@@ -2,3 +2,13 @@ freeze/
 docs/legacy
 
 .env
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.pyright/
+.uv-cache/
+.npm-cache/
+node_modules/
+dist/
+*.tsbuildinfo
