@@ -8,7 +8,6 @@ class Settings(BaseSettings):
     """Configuration required to construct the M01 application."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
         env_prefix="KNOWFLOW_",
         extra="ignore",
     )

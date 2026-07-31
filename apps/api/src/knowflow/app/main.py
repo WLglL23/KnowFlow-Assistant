@@ -12,6 +12,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from knowflow.app.config import Settings
 from knowflow.app.container import AppContainer
 from knowflow.app.errors import (
+    AppError,
+    app_error_handler,
     http_exception_handler,
     unhandled_exception_handler,
     validation_exception_handler,
@@ -27,11 +29,14 @@ async def request_id_middleware(
     request.state.request_id = request_id
     token = request_id_context.set(request_id)
     try:
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            response = await unhandled_exception_handler(request, exc)
+        response.headers["X-Request-ID"] = request_id
+        return response
     finally:
         request_id_context.reset(token)
-    response.headers["X-Request-ID"] = request_id
-    return response
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -52,5 +57,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.middleware("http")(request_id_middleware)
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
+    app.add_exception_handler(AppError, app_error_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
     return app

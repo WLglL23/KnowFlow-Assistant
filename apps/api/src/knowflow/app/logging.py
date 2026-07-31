@@ -6,6 +6,7 @@ import contextvars
 import json
 import logging
 import re
+import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -75,4 +76,8 @@ def configure_logging() -> logging.Logger:
         handler = logging.StreamHandler()
         handler.setFormatter(SafeJsonFormatter())
         logger.addHandler(handler)
+    else:
+        handler = logger.handlers[0]
+        if isinstance(handler, logging.StreamHandler):
+            handler.stream = sys.stderr
     return logger

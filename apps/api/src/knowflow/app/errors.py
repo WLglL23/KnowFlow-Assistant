@@ -17,6 +17,8 @@ _STATUS_CODES = {
     413: "DOCUMENT_TOO_LARGE",
     422: "VALIDATION_FAILED",
     429: "PUBLICATION_CAPACITY_EXCEEDED",
+    410: "CITATION_SOURCE_DELETED",
+    500: "INTERNAL_ERROR",
 }
 
 _STATUS_MESSAGES = {
@@ -28,7 +30,26 @@ _STATUS_MESSAGES = {
     413: "请求内容过大",
     422: "请求参数校验失败",
     429: "当前请求过于频繁",
+    410: "引用来源已删除",
+    500: "服务暂时不可用",
 }
+
+
+class AppError(Exception):
+    """An explicit stable application error for business handlers."""
+
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        details: Any | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.message = message
+        self.details = details
 
 
 def request_id_for(request: Request) -> str:
@@ -59,6 +80,12 @@ async def http_exception_handler(request: Request, exc: Exception) -> JSONRespon
         _STATUS_CODES.get(status_code, "INTERNAL_ERROR"),
         _STATUS_MESSAGES.get(status_code, "服务暂时不可用"),
     )
+
+
+async def app_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    if not isinstance(exc, AppError):
+        return await unhandled_exception_handler(request, exc)
+    return error_response(request, exc.status_code, exc.code, exc.message, exc.details)
 
 
 async def validation_exception_handler(request: Request, exc: Exception) -> JSONResponse:
