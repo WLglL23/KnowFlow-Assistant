@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from knowflow.app.config import Settings
@@ -19,6 +21,8 @@ from knowflow.app.errors import (
     validation_exception_handler,
 )
 from knowflow.app.logging import configure_logging, request_id_context
+from knowflow.identity.api import router as identity_router
+from knowflow.identity.service import IdentityService
 
 
 async def request_id_middleware(
@@ -40,23 +44,47 @@ async def request_id_middleware(
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    """Create the M01 app without connecting to external services."""
+    """Create the M01 app; external connections are deferred to its lifespan."""
 
     if settings is None:
         resolved_settings = Settings()  # pyright: ignore[reportCallIssue]
     else:
         resolved_settings = settings
+    engine = create_async_engine(resolved_settings.mysql_url, pool_pre_ping=True)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    identity = IdentityService(
+        sessions,
+        resolved_settings.jwt_secret.get_secret_value(),
+    )
+    container = AppContainer(
+        settings=resolved_settings,
+        engine=engine,
+        sessions=sessions,
+        identity=identity,
+    )
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
+        del app
+        try:
+            await identity.initialize_seed_accounts(resolved_settings)
+            yield
+        finally:
+            await engine.dispose()
+
     configure_logging()
     app = FastAPI(
         title="KnowFlow API",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        lifespan=lifespan,
     )
-    app.state.container = AppContainer(settings=resolved_settings)
+    app.state.container = container
     app.middleware("http")(request_id_middleware)
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_exception_handler(AppError, app_error_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
+    app.include_router(identity_router)
     return app

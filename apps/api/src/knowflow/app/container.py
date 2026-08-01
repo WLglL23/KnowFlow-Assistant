@@ -2,11 +2,17 @@
 
 from dataclasses import dataclass
 
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
 from knowflow.app.config import Settings
+from knowflow.identity.service import IdentityService
 
 
 @dataclass(frozen=True, slots=True)
 class AppContainer:
-    """Composition-root state without eagerly connecting external services."""
+    """M01 dependencies assembled without eagerly opening a database connection."""
 
     settings: Settings
+    engine: AsyncEngine
+    sessions: async_sessionmaker[AsyncSession]
+    identity: IdentityService
