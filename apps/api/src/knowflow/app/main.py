@@ -23,6 +23,8 @@ from knowflow.app.errors import (
 from knowflow.app.logging import configure_logging, request_id_context
 from knowflow.identity.api import router as identity_router
 from knowflow.identity.service import IdentityService
+from knowflow.knowledge.conversations.api import router as conversations_router
+from knowflow.knowledge.conversations.service import ConversationService
 
 
 async def request_id_middleware(
@@ -56,11 +58,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         sessions,
         resolved_settings.jwt_secret.get_secret_value(),
     )
+    conversations = ConversationService(sessions)
     container = AppContainer(
         settings=resolved_settings,
         engine=engine,
         sessions=sessions,
         identity=identity,
+        conversations=conversations,
     )
 
     @asynccontextmanager
@@ -87,4 +91,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_exception_handler(AppError, app_error_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
     app.include_router(identity_router)
+    app.include_router(conversations_router)
     return app

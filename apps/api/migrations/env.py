@@ -8,7 +8,11 @@ from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from knowflow.identity.models import Base
+from knowflow.app.database import Base
+from knowflow.identity import models as identity_models
+from knowflow.knowledge.conversations import models as conversation_models
+
+del conversation_models, identity_models
 
 config = context.config
 

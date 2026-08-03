@@ -5,11 +5,9 @@ from enum import StrEnum
 
 from sqlalchemy import Boolean, Enum, String, text
 from sqlalchemy.dialects.mysql import DATETIME
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column
 
-
-class Base(DeclarativeBase):
-    pass
+from knowflow.app.database import Base
 
 
 class AccountRole(StrEnum):
