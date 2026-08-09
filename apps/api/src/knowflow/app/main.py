@@ -23,6 +23,8 @@ from knowflow.app.errors import (
 from knowflow.app.logging import configure_logging, request_id_context
 from knowflow.identity.api import router as identity_router
 from knowflow.identity.service import IdentityService
+from knowflow.knowledge.answering.chat import OpenAICompatibleChatAdapter
+from knowflow.knowledge.answering.service import AnsweringService
 from knowflow.knowledge.conversations.api import router as conversations_router
 from knowflow.knowledge.conversations.service import ConversationService
 
@@ -59,12 +61,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         resolved_settings.jwt_secret.get_secret_value(),
     )
     conversations = ConversationService(sessions)
+    chat = OpenAICompatibleChatAdapter(
+        base_url=resolved_settings.chat_base_url,
+        api_key=resolved_settings.chat_api_key,
+        model=resolved_settings.chat_model,
+    )
+    answering = AnsweringService(sessions, chat)
     container = AppContainer(
         settings=resolved_settings,
         engine=engine,
         sessions=sessions,
         identity=identity,
         conversations=conversations,
+        answering=answering,
     )
 
     @asynccontextmanager

@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     seed_admin_username: str
     seed_admin_password: SecretStr
     seed_admin_display_name: str
+    chat_base_url: str | None = None
+    chat_api_key: SecretStr | None = None
+    chat_model: str | None = None
 
     @field_validator(
         "mysql_url",
@@ -43,3 +46,23 @@ class Settings(BaseSettings):
         if not isinstance(value, str) or not value.strip():
             raise ValueError("secret must not be empty")
         return value
+
+    @field_validator("chat_base_url", "chat_model", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return value.strip()
+
+    @field_validator("chat_api_key", mode="before")
+    @classmethod
+    def normalize_optional_secret(cls, value: object) -> object:
+        if isinstance(value, SecretStr):
+            value = value.get_secret_value()
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return value.strip()

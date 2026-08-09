@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from knowflow.app.config import Settings
 from knowflow.identity.service import IdentityService
+from knowflow.knowledge.answering.service import AnsweringService
 from knowflow.knowledge.conversations.service import ConversationService
 
 
@@ -18,3 +19,4 @@ class AppContainer:
     sessions: async_sessionmaker[AsyncSession]
     identity: IdentityService
     conversations: ConversationService
+    answering: AnsweringService

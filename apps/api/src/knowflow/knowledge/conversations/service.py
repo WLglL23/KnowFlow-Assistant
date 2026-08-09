@@ -7,11 +7,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from knowflow.app.errors import AppError
+from knowflow.knowledge.answering.models import Message
 from knowflow.knowledge.conversations.models import Conversation, KnowledgeMode
 from knowflow.knowledge.conversations.schemas import (
     ConversationDetailResponse,
     ConversationListResponse,
     ConversationResponse,
+    MessageResponse,
 )
 
 
@@ -54,8 +56,20 @@ class ConversationService:
             conversation = await self._visible_conversation(
                 session, conversation_id, owner_account_id
             )
+            messages = list(
+                (
+                    await session.scalars(
+                        select(Message)
+                        .where(Message.conversation_id == conversation_id)
+                        .order_by(Message.created_at.asc(), Message.id.asc())
+                    )
+                ).all()
+            )
         response = ConversationResponse.from_model(conversation)
-        return ConversationDetailResponse(**response.model_dump(), messages=[])
+        return ConversationDetailResponse(
+            **response.model_dump(),
+            messages=[MessageResponse.from_model(message) for message in messages],
+        )
 
     async def rename(
         self, conversation_id: str, owner_account_id: str, title: str

@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta, timezone
 
 from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
 
+from knowflow.knowledge.answering.models import Message, MessageRole, MessageStatus
 from knowflow.knowledge.conversations.models import Conversation, KnowledgeMode
 
 UTC_PLUS_EIGHT = timezone(timedelta(hours=8))
@@ -39,8 +40,34 @@ class ConversationListResponse(BaseModel):
     items: list[ConversationResponse]
 
 
+class MessageResponse(BaseModel):
+    id: str
+    role: MessageRole
+    content: str
+    status: MessageStatus
+    citations: list[dict[str, object]]
+    created_at: datetime
+
+    @classmethod
+    def from_model(cls, message: Message) -> MessageResponse:
+        return cls(
+            id=message.id,
+            role=message.role,
+            content=message.content,
+            status=message.status,
+            citations=message.citations_json,
+            created_at=message.created_at,
+        )
+
+    @field_serializer("created_at")
+    def serialize_datetime(self, value: datetime) -> str:
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(UTC_PLUS_EIGHT).isoformat(timespec="microseconds")
+
+
 class ConversationDetailResponse(ConversationResponse):
-    messages: list[dict[str, object]]
+    messages: list[MessageResponse]
 
 
 class ConversationPatchRequest(BaseModel):
