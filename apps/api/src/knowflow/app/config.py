@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     chat_base_url: str | None = None
     chat_api_key: SecretStr | None = None
     chat_model: str | None = None
+    run_deadline_seconds: int = 600
 
     @field_validator(
         "mysql_url",
@@ -66,3 +67,10 @@ class Settings(BaseSettings):
         if not isinstance(value, str) or not value.strip():
             return None
         return value.strip()
+
+    @field_validator("run_deadline_seconds")
+    @classmethod
+    def require_positive_run_deadline(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("run deadline must be positive")
+        return value

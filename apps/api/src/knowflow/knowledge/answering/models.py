@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import JSON, Enum, ForeignKey, String, Text
+from sqlalchemy import JSON, Enum, ForeignKey, Index, String, Text
 from sqlalchemy.dialects.mysql import DATETIME
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -69,6 +69,16 @@ class Message(Base):
 
 class AgentRun(Base):
     __tablename__ = "agent_runs"
+    __table_args__ = (
+        Index("ix_agent_runs_actor_status", "actor_account_id", "status"),
+        Index("ix_agent_runs_conversation_status", "conversation_id", "status"),
+        Index(
+            "ix_agent_runs_actor_conversation_request",
+            "actor_account_id",
+            "conversation_id",
+            "client_request_id",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     actor_account_id: Mapped[str] = mapped_column(
