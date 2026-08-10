@@ -31,6 +31,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
     window.sessionStorage.removeItem(TOKEN_KEY);
     setToken(null);
     queryClient.removeQueries({ queryKey: ["auth", "me"] });
+    queryClient.removeQueries({ queryKey: ["conversations"] });
+    queryClient.removeQueries({ queryKey: ["conversation"] });
   }, [queryClient]);
 
   useEffect(() => {

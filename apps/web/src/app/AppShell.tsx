@@ -2,6 +2,7 @@ import { BadgeCheck, ChevronLeft, LogOut, PanelLeft, ShieldCheck } from "lucide-
 import { useState } from "react";
 
 import { useAuth } from "../features/auth/AuthContext";
+import { ConversationWorkspace } from "../features/conversation/ConversationWorkspace";
 
 function roleLabel(role: "ADMIN" | "EMPLOYEE", isGuest: boolean): string {
   if (isGuest) return "游客";
@@ -66,35 +67,7 @@ export function AppShell() {
           </div>
         </header>
 
-        <div className="workspace-content panel">
-          <div className="flow-field" aria-hidden="true">
-            <span className="flow-ring ring-one" />
-            <span className="flow-ring ring-two" />
-            <span className="flow-dot dot-one" />
-            <span className="flow-dot dot-two" />
-          </div>
-
-          <div className="welcome-copy">
-            <span className="welcome-label">WELCOME TO KNOWFLOW</span>
-            <h2>{account.display_name}，欢迎回来</h2>
-            <p>当前标签页已建立安全身份。你可以从这里进入知办助手的工作空间。</p>
-          </div>
-
-          <dl className="identity-grid">
-            <div>
-              <dt>当前账号</dt>
-              <dd>{account.username}</dd>
-            </div>
-            <div>
-              <dt>身份类型</dt>
-              <dd>{label}</dd>
-            </div>
-            <div>
-              <dt>会话范围</dt>
-              <dd>当前标签页</dd>
-            </div>
-          </dl>
-        </div>
+        <ConversationWorkspace account={account} />
       </section>
     </main>
   );
