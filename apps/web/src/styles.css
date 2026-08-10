@@ -194,7 +194,10 @@ button:focus-visible, input:focus-visible { outline: 3px solid rgba(21, 87, 246,
 .message-content { padding: 13px 16px; border: 1px solid var(--line); border-radius: 12px; color: #27334b; background: #fff; line-height: 1.75; white-space: pre-wrap; }
 .message.user .message-content { border-color: #cfe0ff; color: #183d8e; background: #f2f6ff; }
 .message-content p { margin: 0 0 10px; }.message-content p:last-child { margin-bottom: 0; }.message-content pre { overflow-x: auto; padding: 10px; border-radius: 8px; background: #f4f6fa; }
-.streaming-label { color: #2865df; }.typing-indicator { color: #8090aa; }
+.streaming-label { color: #2865df; }.typing-indicator, .message-empty { color: #8090aa; }
+.message-status { margin-left: auto; padding: 2px 7px; border-radius: 8px; font-weight: 600; }
+.message-status.pending { color: #1d59d2; background: #edf3ff; }
+.message-status.partial { color: #a43d45; background: #fff0f1; }
 .conversation-error { display: flex; align-items: center; gap: 8px; margin: 0 24px 10px; padding: 10px 12px; border: 1px solid #f2c6c9; border-radius: 9px; color: #b33c44; background: #fff5f5; font-size: 12px; }
 .composer { position: relative; display: flex; align-items: flex-end; gap: 10px; padding: 15px 18px 23px; border-top: 1px solid var(--line); background: #fbfcfe; }
 .composer textarea { min-height: 48px; max-height: 130px; flex: 1; resize: vertical; padding: 13px 46px 13px 14px; border: 1px solid #dbe3ef; border-radius: 11px; outline: 0; color: #25324a; background: #fff; line-height: 1.5; }
