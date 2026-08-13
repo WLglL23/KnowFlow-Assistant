@@ -24,6 +24,19 @@ class Settings(BaseSettings):
     chat_api_key: SecretStr | None = None
     chat_model: str | None = None
     run_deadline_seconds: int = 600
+    elasticsearch_url: str = "http://127.0.0.1:9200"
+    elasticsearch_index: str = "knowflow-documents"
+    minio_endpoint: str = "http://127.0.0.1:9000"
+    minio_access_key: str = "minioadmin"
+    minio_secret_key: SecretStr = SecretStr("minioadmin")
+    minio_bucket: str = "knowflow-documents"
+    embedding_base_url: str | None = None
+    embedding_api_key: SecretStr | None = None
+    embedding_model: str | None = None
+    embedding_dimensions: int = 1024
+    attachment_max_bytes: int = 10_485_760
+    document_max_pages: int = 100
+    docling_hf_home: str | None = None
 
     @field_validator(
         "mysql_url",
@@ -48,7 +61,9 @@ class Settings(BaseSettings):
             raise ValueError("secret must not be empty")
         return value
 
-    @field_validator("chat_base_url", "chat_model", mode="before")
+    @field_validator(
+        "chat_base_url", "chat_model", "embedding_base_url", "embedding_model", mode="before"
+    )
     @classmethod
     def normalize_optional_text(cls, value: object) -> object:
         if value is None:
@@ -57,7 +72,7 @@ class Settings(BaseSettings):
             return None
         return value.strip()
 
-    @field_validator("chat_api_key", mode="before")
+    @field_validator("chat_api_key", "embedding_api_key", mode="before")
     @classmethod
     def normalize_optional_secret(cls, value: object) -> object:
         if isinstance(value, SecretStr):

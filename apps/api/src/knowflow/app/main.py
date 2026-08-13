@@ -29,6 +29,8 @@ from knowflow.knowledge.answering.policy import core_experimental_policy
 from knowflow.knowledge.answering.service import AnsweringService
 from knowflow.knowledge.conversations.api import router as conversations_router
 from knowflow.knowledge.conversations.service import ConversationService
+from knowflow.knowledge.documents.api import router as documents_router
+from knowflow.knowledge.documents.attachments import AttachmentDocuments
 
 
 class RequestIdMiddleware:
@@ -86,6 +88,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         chat,
         core_experimental_policy(resolved_settings.run_deadline_seconds),
     )
+    documents = AttachmentDocuments(sessions, resolved_settings)
     container = AppContainer(
         settings=resolved_settings,
         engine=engine,
@@ -93,6 +96,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         identity=identity,
         conversations=conversations,
         answering=answering,
+        documents=documents,
     )
 
     @asynccontextmanager
@@ -101,8 +105,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             await identity.initialize_seed_accounts(resolved_settings)
             await answering.recover_interrupted_runs()
+            await documents.start()
             yield
         finally:
+            await documents.stop()
             await engine.dispose()
 
     configure_logging()
@@ -122,4 +128,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(identity_router)
     app.include_router(conversations_router)
     app.include_router(answering_router)
+    app.include_router(documents_router)
     return app
