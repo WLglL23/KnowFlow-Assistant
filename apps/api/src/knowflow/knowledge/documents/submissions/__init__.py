@@ -111,10 +111,14 @@ class SubmissionDocuments:
         return SubmissionListResponse(items=[SubmissionResponse.from_model(item) for item in items])
 
     async def _compensate_object(self, object_key: str) -> None:
-        try:
-            await self._objects.delete(object_key)
-        except Exception as exc:
-            logging.getLogger("knowflow.documents").error(
-                "Submission object compensation failed",
-                extra={"exception_type": type(exc).__name__},
-            )
+        exception_type = "Exception"
+        for _attempt in range(3):
+            try:
+                await self._objects.delete(object_key)
+                return
+            except Exception as exc:
+                exception_type = type(exc).__name__
+        logging.getLogger("knowflow.documents").error(
+            "Submission object compensation failed",
+            extra={"exception_type": exception_type},
+        )
