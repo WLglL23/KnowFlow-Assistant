@@ -14,9 +14,40 @@ export type Message = {
   role: "USER" | "ASSISTANT";
   content: string;
   status: "PENDING" | "COMPLETE" | "PARTIAL";
-  citations: unknown[];
+  citations: Citation[];
   created_at: string;
 };
+
+export type Citation = {
+  source_type: "ATTACHMENT" | "KNOWLEDGE_SOURCE";
+  source_id: string;
+  filename: string;
+  pages: number[];
+};
+
+export type AttachmentStatus = "QUEUED" | "PROCESSING" | "READY" | "FAILED";
+export type AttachmentStage = "PARSING" | "CHUNKING" | "EMBEDDING" | "INDEXING";
+
+export type Attachment = {
+  id: string;
+  filename: string;
+  size_bytes: number;
+  page_count: number;
+  status: AttachmentStatus;
+  processing_stage: AttachmentStage | null;
+  processing_progress: number | null;
+  processing_error_code: string | null;
+  created_at: string;
+};
+
+export type AttachmentList = { items: Attachment[] };
+export type AttachmentUploadResult =
+  | "CREATED"
+  | "EXISTING_QUEUED"
+  | "EXISTING_PROCESSING"
+  | "ALREADY_EXISTS"
+  | "RETRY_QUEUED";
+export type AttachmentUploadResponse = { result: AttachmentUploadResult; attachment: Attachment };
 
 export type ConversationDetail = Conversation & { messages: Message[] };
 export type ConversationList = { items: Conversation[] };
@@ -40,12 +71,13 @@ async function parseError(response: Response): Promise<never> {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const isFormData = init.body instanceof FormData;
   const response = await fetch(path, {
     ...init,
     headers: {
       Accept: "application/json",
       Authorization: `Bearer ${token()}`,
-      ...(init.body ? { "Content-Type": "application/json" } : {}),
+      ...(init.body && !isFormData ? { "Content-Type": "application/json" } : {}),
       ...init.headers,
     },
   });
@@ -58,6 +90,24 @@ export const createConversation = () => request<Conversation>("/api/conversation
 export const getConversation = (id: string) => request<ConversationDetail>(`/api/conversations/${id}`);
 export const renameConversation = (id: string, title: string) =>
   request<Conversation>(`/api/conversations/${id}`, { method: "PATCH", body: JSON.stringify({ title }) });
+export const listAttachments = (conversationId: string) =>
+  request<AttachmentList>(`/api/conversations/${conversationId}/attachments`);
+export const uploadAttachment = (conversationId: string, file: File) => {
+  const body = new FormData();
+  body.append("file", file);
+  return request<AttachmentUploadResponse>(`/api/conversations/${conversationId}/attachments`, {
+    method: "POST",
+    body,
+  });
+};
+
+export async function getCitationPreview(messageId: string, citationIndex: number): Promise<Blob> {
+  const response = await fetch(`/api/messages/${messageId}/citations/${citationIndex}/preview`, {
+    headers: { Accept: "application/pdf", Authorization: `Bearer ${token()}` },
+  });
+  if (!response.ok) return parseError(response);
+  return response.blob();
+}
 
 export type RunEvent = {
   type: "stage.started" | "stage.completed" | "answer.delta" | "run.completed" | "run.failed";

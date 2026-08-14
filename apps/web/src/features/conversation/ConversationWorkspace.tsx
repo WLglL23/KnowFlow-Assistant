@@ -1,10 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronLeft, LogOut, PanelLeft, Plus, Send, Pencil, Check, X, MessageSquare, AlertCircle } from "lucide-react";
+import { AlertCircle, BookOpen, Check, ChevronDown, ChevronLeft, LogOut, MessageSquare, PanelLeft, Pencil, Plus, X } from "lucide-react";
 import Markdown from "react-markdown";
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 
 import { ApiError, type Account } from "../../api/auth";
-import { createConversation, getConversation, listConversations, renameConversation, streamRun, type Conversation, type RunEvent } from "../../api/conversations";
+import { createConversation, getConversation, listConversations, renameConversation, streamRun, type Citation, type Conversation, type RunEvent } from "../../api/conversations";
+import type { CitationSelection } from "../citations/CitationPreviewPanel";
+import { ConversationComposer } from "./ConversationComposer";
+
+const CitationPreviewPanel = lazy(async () => ({
+  default: (await import("../citations/CitationPreviewPanel")).CitationPreviewPanel,
+}));
 
 function errorMessage(error: unknown): string {
   if (!(error instanceof ApiError)) return "请求未完成，请稍后重试";
@@ -42,6 +48,30 @@ function roleLabel(role: Account["role"], isGuest: boolean): string {
   return role === "ADMIN" ? "管理员" : "员工";
 }
 
+function MessageCitations({ messageId, citations, onSelect }: { messageId: string; citations: Citation[]; onSelect: (selection: CitationSelection) => void }) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <div className="message-citations">
+      <button className="citation-toggle" type="button" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
+        <BookOpen size={14} />
+        <span>引用来源 {citations.length}</span>
+        <ChevronDown className={expanded ? "expanded" : ""} size={15} />
+      </button>
+      {expanded && (
+        <div className="citation-list" aria-label="回答引用">
+          {citations.map((citation, citationIndex) => (
+            <button key={`${messageId}-${citationIndex}`} type="button" className="citation-chip" onClick={() => onSelect({ messageId, citationIndex, citation })}>
+              <span title={citation.filename}>{citation.filename}</span>
+              <small>第 {citation.pages.join("、")} 页</small>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ConversationWorkspace({ account, onLogout }: { account: Account; onLogout: () => void }) {
   const client = useQueryClient();
   const [collapsed, setCollapsed] = useState(false);
@@ -53,6 +83,7 @@ export function ConversationWorkspace({ account, onLogout }: { account: Account;
   const [streaming, setStreaming] = useState(false);
   const [streamText, setStreamText] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [citationSelection, setCitationSelection] = useState<CitationSelection | null>(null);
 
   const conversationListKey = ["conversations", account.id] as const;
   const conversationDetailKey = ["conversation", account.id, selectedId] as const;
@@ -63,7 +94,12 @@ export function ConversationWorkspace({ account, onLogout }: { account: Account;
     setSelectedId(null);
     setEditing(false);
     setError(null);
+    setCitationSelection(null);
   }, [account.id]);
+
+  useEffect(() => {
+    setCitationSelection(null);
+  }, [selectedId]);
 
   useEffect(() => {
     if (selectedId === null && conversations.data?.items[0]) setSelectedId(conversations.data.items[0].id);
@@ -171,20 +207,21 @@ export function ConversationWorkspace({ account, onLogout }: { account: Account;
         </div>
       </aside>
 
-      <section className="workspace-main">
+      <section className={`workspace-main conversation-workbench ${citationSelection ? "preview-open" : ""}`}>
       <section className="conversation-panel">
         {selected && <header className="conversation-header"><div>{editing ? <div className="title-edit"><input value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") saveTitle(); if (event.key === "Escape") setEditing(false); }} autoFocus /><button className="icon-button" type="button" onClick={saveTitle} disabled={renameMutation.isPending} aria-label="保存标题"><Check size={17} /></button><button className="icon-button" type="button" onClick={() => setEditing(false)} disabled={renameMutation.isPending} aria-label="取消重命名"><X size={17} /></button></div> : <div className="title-row"><h2>{detail.data?.title ?? selected.title}</h2><button className="icon-button" type="button" onClick={() => { setTitleDraft(detail.data?.title ?? selected.title); setError(null); setEditing(true); }} aria-label="重命名会话" title="重命名"><Pencil size={16} /></button></div>}</div> </header>}
         <div className="message-flow" aria-live="polite">
           {!selected && <div className="empty-detail"><MessageSquare size={30} /><h3>选择一个会话</h3><p>从左侧选择会话，或创建一个新的会话。</p></div>}
           {selected && detail.isPending && <div className="empty-detail"><p>正在加载会话详情…</p></div>}
           {selected && detail.isError && <div className="empty-detail query-error" role="alert"><AlertCircle size={24} /><h3>{errorMessage(detail.error)}</h3><button type="button" onClick={() => void detail.refetch()}>重新加载</button></div>}
-          {selected && !detail.isPending && !detail.isError && messages.length === 0 && !streaming && <div className="empty-detail"><MessageSquare size={30} /><h3>开始一段对话</h3><p>提出一个普通问题，助手会在当前会话中连续回答。</p></div>}
-          {messages.map((message) => <article key={message.id} className={`message ${message.role === "USER" ? "user" : "assistant"}`}><div className="message-role">{message.role === "USER" ? "你" : "知办助手"}<time>{formatTime(message.created_at)}</time></div><div className="message-content">{message.role === "ASSISTANT" ? <>{message.content ? <Markdown>{message.content}</Markdown> : message.status === "PARTIAL" ? <span className="message-empty">回答未生成。</span> : null}{message.status === "PARTIAL" && <div className="message-error">错误：回答未完成</div>}</> : message.content}</div></article>)}
+          {selected && !detail.isPending && !detail.isError && messages.length === 0 && !streaming && <div className="empty-detail"><MessageSquare size={30} /><h3>开始一段对话</h3><p>上传 PDF，或直接输入问题。</p></div>}
+          {messages.map((message) => <article key={message.id} className={`message ${message.role === "USER" ? "user" : "assistant"}`}><div className="message-role">{message.role === "USER" ? "你" : "知办助手"}<time>{formatTime(message.created_at)}</time></div><div className="message-content">{message.role === "ASSISTANT" ? <>{message.content ? <Markdown>{message.content}</Markdown> : message.status === "PARTIAL" ? <span className="message-empty">回答未生成。</span> : null}{message.status === "PARTIAL" && <div className="message-error">错误：回答未完成</div>}{message.citations.length > 0 && <MessageCitations messageId={message.id} citations={message.citations} onSelect={setCitationSelection} />}</> : message.content}</div></article>)}
           {streaming && <article className="message assistant"><div className="message-role">知办助手<span className="streaming-label">{stage ? stageLabels[stage] ?? stage : "等待接受"}</span></div><div className="message-content">{streamText ? <Markdown>{streamText}</Markdown> : <span className="typing-indicator">{stage ? `${stageLabels[stage] ?? stage}…` : "请求已提交，等待服务响应…"}</span>}</div></article>}
         </div>
         {error && <div className="conversation-error" role="alert"><AlertCircle size={17} />{error}</div>}
-        <div className="composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder="输入你的问题…" aria-label="问题输入" disabled={streaming || !selectedId} /><button className="send-button" type="button" onClick={() => void send()} disabled={streaming || !selectedId || !draft.trim()} aria-label="发送问题" title="发送"><Send size={18} /></button><small>Enter 发送 · Shift + Enter 换行</small></div>
+        <ConversationComposer accountId={account.id} conversationId={selectedId} draft={draft} streaming={streaming} onDraftChange={setDraft} onSend={() => void send()} />
       </section>
+      {citationSelection && <Suspense fallback={<aside className="citation-panel"><div className="citation-state">正在打开引用预览…</div></aside>}><CitationPreviewPanel selection={citationSelection} onClose={() => setCitationSelection(null)} /></Suspense>}
       </section>
     </main>
   );
