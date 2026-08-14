@@ -109,9 +109,7 @@ class OpenAICompatibleChatAdapter:
     async def complete_json(
         self, messages: Sequence[ChatMessage], *, timeout_seconds: float
     ) -> ChatJsonResult:
-        result = await self._complete_text_json_mode(
-            messages, timeout_seconds=timeout_seconds
-        )
+        result = await self._complete_text_json_mode(messages, timeout_seconds=timeout_seconds)
         try:
             parsed: object = json.loads(result.content)
         except json.JSONDecodeError as exc:

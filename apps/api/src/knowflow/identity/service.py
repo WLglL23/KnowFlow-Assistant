@@ -51,15 +51,9 @@ class IdentityService:
         )
         async with self._sessions() as session, session.begin():
             for username, password, display_name, role in seeds:
-                existing = await session.scalar(
-                    select(Account).where(Account.username == username)
-                )
+                existing = await session.scalar(select(Account).where(Account.username == username))
                 if existing is not None:
-                    if (
-                        existing.role != role
-                        or existing.is_guest
-                        or existing.password_hash is None
-                    ):
+                    if existing.role != role or existing.is_guest or existing.password_hash is None:
                         raise RuntimeError("seed account role conflict")
                     continue
                 session.add(

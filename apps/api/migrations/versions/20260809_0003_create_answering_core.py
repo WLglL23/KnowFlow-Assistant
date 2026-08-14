@@ -29,9 +29,7 @@ def upgrade() -> None:
         sa.Column("conversation_id", sa.String(length=37), nullable=False),
         sa.Column("role", mysql.ENUM("USER", "ASSISTANT"), nullable=False),
         sa.Column("content", sa.Text(), nullable=False),
-        sa.Column(
-            "status", mysql.ENUM("PENDING", "COMPLETE", "PARTIAL"), nullable=False
-        ),
+        sa.Column("status", mysql.ENUM("PENDING", "COMPLETE", "PARTIAL"), nullable=False),
         sa.Column("citations_json", mysql.JSON(), nullable=False),
         sa.Column("created_at", mysql.DATETIME(fsp=6), nullable=False),
         sa.ForeignKeyConstraint(["conversation_id"], ["conversations.id"]),
@@ -77,9 +75,7 @@ def upgrade() -> None:
         sa.Column("run_id", sa.String(length=36), nullable=False),
         sa.Column(
             "stage",
-            mysql.ENUM(
-                "UNDERSTAND", "PLAN", "RETRIEVE_1", "VERIFY", "RETRIEVE_2", "GENERATE"
-            ),
+            mysql.ENUM("UNDERSTAND", "PLAN", "RETRIEVE_1", "VERIFY", "RETRIEVE_2", "GENERATE"),
             nullable=False,
         ),
         sa.Column(

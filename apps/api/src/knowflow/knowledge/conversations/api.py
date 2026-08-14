@@ -23,16 +23,12 @@ def container_for(request: Request) -> AppContainer:
 
 
 @router.post("", response_model=ConversationResponse, status_code=status.HTTP_201_CREATED)
-async def create_conversation(
-    request: Request, account: CurrentAccount
-) -> ConversationResponse:
+async def create_conversation(request: Request, account: CurrentAccount) -> ConversationResponse:
     return await container_for(request).conversations.create(account.id)
 
 
 @router.get("", response_model=ConversationListResponse)
-async def list_conversations(
-    request: Request, account: CurrentAccount
-) -> ConversationListResponse:
+async def list_conversations(request: Request, account: CurrentAccount) -> ConversationListResponse:
     return await container_for(request).conversations.list_for_owner(account.id)
 
 
