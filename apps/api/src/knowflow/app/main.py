@@ -26,11 +26,14 @@ from knowflow.identity.service import IdentityService
 from knowflow.knowledge.answering.api import router as answering_router
 from knowflow.knowledge.answering.chat import OpenAICompatibleChatAdapter
 from knowflow.knowledge.answering.policy import core_experimental_policy
+from knowflow.knowledge.answering.retrieval import AttachmentRetrieval
 from knowflow.knowledge.answering.service import AnsweringService
 from knowflow.knowledge.conversations.api import router as conversations_router
 from knowflow.knowledge.conversations.service import ConversationService
 from knowflow.knowledge.documents.api import router as documents_router
 from knowflow.knowledge.documents.attachments import AttachmentDocuments
+from knowflow.knowledge.documents.citations import CitationPreview
+from knowflow.knowledge.documents.citations.api import router as citation_router
 
 
 class RequestIdMiddleware:
@@ -83,12 +86,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         api_key=resolved_settings.chat_api_key,
         model=resolved_settings.chat_model,
     )
+    retrieval = AttachmentRetrieval(
+        elasticsearch_url=resolved_settings.elasticsearch_url,
+        elasticsearch_index=resolved_settings.elasticsearch_index,
+        embedding_base_url=resolved_settings.embedding_base_url,
+        embedding_api_key=resolved_settings.embedding_api_key,
+        embedding_model=resolved_settings.embedding_model,
+        embedding_dimensions=resolved_settings.embedding_dimensions,
+        rerank_base_url=resolved_settings.rerank_base_url,
+        rerank_api_key=resolved_settings.rerank_api_key,
+        rerank_model=resolved_settings.rerank_model,
+    )
     answering = AnsweringService(
         sessions,
         chat,
         core_experimental_policy(resolved_settings.run_deadline_seconds),
+        retrieval,
     )
     documents = AttachmentDocuments(sessions, resolved_settings)
+    citations = CitationPreview(sessions, documents)
     container = AppContainer(
         settings=resolved_settings,
         engine=engine,
@@ -96,7 +112,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         identity=identity,
         conversations=conversations,
         answering=answering,
+        retrieval=retrieval,
         documents=documents,
+        citations=citations,
     )
 
     @asynccontextmanager
@@ -129,4 +147,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(conversations_router)
     app.include_router(answering_router)
     app.include_router(documents_router)
+    app.include_router(citation_router)
     return app

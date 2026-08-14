@@ -518,3 +518,6 @@ class AttachmentDocuments:
             )
             response.raise_for_status()
             return response.content
+
+    async def read_source_object(self, key: str) -> bytes:
+        return await self._get_object(key)

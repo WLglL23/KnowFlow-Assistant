@@ -5,6 +5,7 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import or_, select
@@ -46,8 +47,10 @@ from knowflow.knowledge.answering.models import (
     StageStatus,
 )
 from knowflow.knowledge.answering.policy import RunPolicy
+from knowflow.knowledge.answering.retrieval import AttachmentRetrieval, Evidence, RetrievalError
 from knowflow.knowledge.answering.trace import (
     RunTraceV1,
+    TraceRetrieval,
     TraceRetry,
     TraceStageTiming,
     TraceTermination,
@@ -57,6 +60,7 @@ from knowflow.knowledge.answering.trace import (
     TraceVersions,
 )
 from knowflow.knowledge.conversations.models import Conversation, KnowledgeMode
+from knowflow.knowledge.documents.models import AttachmentStatus, ConversationAttachment
 
 
 class RouteDecision(BaseModel):
@@ -65,6 +69,19 @@ class RouteDecision(BaseModel):
     route: AnswerRoute
     standalone_question: str
     reason_code: str
+
+
+class RetrievalPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    queries: list[str]
+
+
+class VerificationDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    coverage: Literal["FULL", "NONE"]
+    missing_facts: list[str]
 
 
 class RunExecutionError(RuntimeError):
@@ -85,6 +102,9 @@ class RunExecutionContext:
     current_stage_id: str | None = None
     current_stage: StageName | None = None
     terminal_committed: bool = False
+    evidence: list[Evidence] = field(default_factory=lambda: [])
+    evidence_token_count: int = 0
+    citations: list[dict[str, object]] = field(default_factory=lambda: [])
 
     @property
     def answer(self) -> str:
@@ -119,10 +139,12 @@ class AnsweringService:
         sessions: async_sessionmaker[AsyncSession],
         chat: ChatClient,
         policy: RunPolicy,
+        retrieval: AttachmentRetrieval,
     ) -> None:
         self._sessions = sessions
         self._chat = chat
         self._policy = policy
+        self._retrieval = retrieval
         self._settlement_tasks: set[asyncio.Task[None]] = set()
 
     async def accept_turn(
@@ -229,7 +251,7 @@ class AnsweringService:
                     client_request_id=normalized_request_id,
                     status=RunStatus.RUNNING,
                     route=None,
-                    source_scope_json=self._source_scope(conversation),
+                    source_scope_json=await self._source_scope(session, conversation),
                     trace_version=self._policy.trace_version,
                     policy_version=self._policy.policy_version,
                     trace_json=self._trace_without_stages(
@@ -297,9 +319,7 @@ class AnsweringService:
                 "RUN_LIMIT_EXCEEDED",
             )
             context.terminal_committed = True
-            yield self._failed_event(
-                request_id, run_id, assistant_message_id, "RUN_LIMIT_EXCEEDED"
-            )
+            yield self._failed_event(request_id, run_id, assistant_message_id, "RUN_LIMIT_EXCEEDED")
         except RunExecutionError as exc:
             if context.terminal_committed:
                 return
@@ -311,9 +331,7 @@ class AnsweringService:
                 exc.error_code,
             )
             context.terminal_committed = True
-            yield self._failed_event(
-                request_id, run_id, assistant_message_id, exc.error_code
-            )
+            yield self._failed_event(request_id, run_id, assistant_message_id, exc.error_code)
         except (asyncio.CancelledError, GeneratorExit):
             if not context.terminal_committed:
                 self._schedule_interruption(run_id, assistant_message_id, context)
@@ -329,9 +347,7 @@ class AnsweringService:
                 "INTERNAL_ERROR",
             )
             context.terminal_committed = True
-            yield self._failed_event(
-                request_id, run_id, assistant_message_id, "INTERNAL_ERROR"
-            )
+            yield self._failed_event(request_id, run_id, assistant_message_id, "INTERNAL_ERROR")
 
     async def _execute(
         self,
@@ -360,30 +376,95 @@ class AnsweringService:
         context.current_stage = None
         yield StageEvent("stage.completed", request_id, run_id, StageName.UNDERSTAND.value)
 
-        await self._enter_stage(run_id, StageName.GENERATE, context)
-        yield StageEvent("stage.started", request_id, run_id, StageName.GENERATE.value)
-        try:
-            if decision.route is AnswerRoute.RETRIEVAL:
+        if decision.route is AnswerRoute.RETRIEVAL:
+            source_filenames = await self._source_filenames(run_id)
+            if source_filenames:
+                await self._enter_stage(run_id, StageName.PLAN, context)
+                yield StageEvent("stage.started", request_id, run_id, StageName.PLAN.value)
+                plan = await self._plan(prepared, decision, context)
+                await self._complete_stage(context.current_stage_id)
+                context.current_stage_id = None
+                context.current_stage = None
+                yield StageEvent("stage.completed", request_id, run_id, StageName.PLAN.value)
+
+                await self._enter_stage(run_id, StageName.RETRIEVE_1, context)
+                yield StageEvent("stage.started", request_id, run_id, StageName.RETRIEVE_1.value)
+                context.evidence = await self._retrieve(plan, source_filenames, context)
+                context.evidence, context.evidence_token_count = self._retrieval.select(
+                    context.evidence,
+                    max_chunks=self._policy.limits.max_evidence_chunks,
+                    max_tokens=self._policy.limits.max_evidence_tokens,
+                )
+                await self._complete_stage(context.current_stage_id)
+                context.current_stage_id = None
+                context.current_stage = None
+                yield StageEvent("stage.completed", request_id, run_id, StageName.RETRIEVE_1.value)
+
+                await self._enter_stage(run_id, StageName.VERIFY, context)
+                yield StageEvent("stage.started", request_id, run_id, StageName.VERIFY.value)
+                verification = await self._verify(plan, context.evidence, context)
+                context.coverage = verification.coverage
+                await self._complete_stage(context.current_stage_id)
+                context.current_stage_id = None
+                context.current_stage = None
+                yield StageEvent("stage.completed", request_id, run_id, StageName.VERIFY.value)
+
+                await self._enter_stage(run_id, StageName.GENERATE, context)
+                yield StageEvent("stage.started", request_id, run_id, StageName.GENERATE.value)
+                try:
+                    if verification.coverage == "FULL":
+                        context.citations = self._citations(context.evidence)
+                        async for delta in self._generate_grounded(
+                            prepared, content, decision, context.evidence, context
+                        ):
+                            visible, exceeded = self._append_visible_delta(context, delta)
+                            if visible:
+                                yield AnswerDeltaEvent("answer.delta", request_id, run_id, visible)
+                            if exceeded:
+                                raise RunExecutionError("RUN_LIMIT_EXCEEDED")
+                    else:
+                        refusal = "当前证据不足，无法可靠回答该问题。请补充包含相关事实的 PDF。"
+                        visible, exceeded = self._append_visible_delta(context, refusal)
+                        if visible:
+                            yield AnswerDeltaEvent("answer.delta", request_id, run_id, visible)
+                        if exceeded:
+                            raise RunExecutionError("RUN_LIMIT_EXCEEDED")
+                    await self._complete_stage(context.current_stage_id)
+                except ChatError as exc:
+                    raise RunExecutionError("MODEL_FAILED") from exc
+                context.current_stage_id = None
+                context.current_stage = None
+                yield StageEvent("stage.completed", request_id, run_id, StageName.GENERATE.value)
+            else:
+                await self._enter_stage(run_id, StageName.GENERATE, context)
+                yield StageEvent("stage.started", request_id, run_id, StageName.GENERATE.value)
                 context.coverage = "NONE"
                 refusal = "当前没有可用资料。请上传附件或开启并选择知识源后再试。"
-                delta, exceeded = self._append_visible_delta(context, refusal)
-                if delta:
-                    yield AnswerDeltaEvent("answer.delta", request_id, run_id, delta)
+                visible, exceeded = self._append_visible_delta(context, refusal)
+                if visible:
+                    yield AnswerDeltaEvent("answer.delta", request_id, run_id, visible)
                 if exceeded:
                     raise RunExecutionError("RUN_LIMIT_EXCEEDED")
-            else:
+                await self._complete_stage(context.current_stage_id)
+                context.current_stage_id = None
+                context.current_stage = None
+                yield StageEvent("stage.completed", request_id, run_id, StageName.GENERATE.value)
+        else:
+            await self._enter_stage(run_id, StageName.GENERATE, context)
+            yield StageEvent("stage.started", request_id, run_id, StageName.GENERATE.value)
+            try:
                 async for delta in self._generate(prepared, content, decision, context):
                     visible, exceeded = self._append_visible_delta(context, delta)
                     if visible:
                         yield AnswerDeltaEvent("answer.delta", request_id, run_id, visible)
                     if exceeded:
                         raise RunExecutionError("RUN_LIMIT_EXCEEDED")
-            await self._complete_stage(context.current_stage_id)
-        except ChatError as exc:
-            raise RunExecutionError("MODEL_FAILED") from exc
-        context.current_stage_id = None
-        context.current_stage = None
-        yield StageEvent("stage.completed", request_id, run_id, StageName.GENERATE.value)
+                await self._complete_stage(context.current_stage_id)
+            except ChatError as exc:
+                raise RunExecutionError("MODEL_FAILED") from exc
+            context.current_stage_id = None
+            context.current_stage = None
+            yield StageEvent("stage.completed", request_id, run_id, StageName.GENERATE.value)
 
         try:
             await self._converge_success(
@@ -401,12 +482,173 @@ class AnsweringService:
                 "INTERNAL_ERROR",
             )
             context.terminal_committed = True
-            yield self._failed_event(
-                request_id, run_id, assistant_message_id, "INTERNAL_ERROR"
-            )
+            yield self._failed_event(request_id, run_id, assistant_message_id, "INTERNAL_ERROR")
             return
         context.terminal_committed = True
         yield RunCompletedEvent("run.completed", request_id, run_id, assistant_message_id)
+
+    async def _source_filenames(self, run_id: str) -> dict[str, str]:
+        async with self._sessions() as session:
+            run = await session.get(AgentRun, run_id)
+            if run is None:
+                raise RuntimeError("Answering run is missing")
+            raw_ids = run.source_scope_json.get("attachment_ids")
+            if not isinstance(raw_ids, list):
+                raise RuntimeError("Answering run source scope is invalid")
+            id_values = cast(list[object], raw_ids)
+            if not all(isinstance(item, str) for item in id_values):
+                raise RuntimeError("Answering run source scope is invalid")
+            ids = cast(list[str], id_values)
+            if not ids:
+                return {}
+            items = list(
+                (
+                    await session.scalars(
+                        select(ConversationAttachment).where(ConversationAttachment.id.in_(ids))
+                    )
+                ).all()
+            )
+        return {item.id: item.filename for item in items if item.id in ids}
+
+    async def _plan(
+        self, prepared: PreparedContext, decision: RouteDecision, context: RunExecutionContext
+    ) -> RetrievalPlan:
+        messages = [
+            ChatMessage(
+                "system", "为独立 PDF 问题生成一个检索查询。只返回 JSON：{\"queries\":[\"...\"]}。"
+            ),
+            *prepared.chat_messages(decision.standalone_question),
+        ]
+        while True:
+            try:
+                result = await self._chat.complete_json(
+                    messages, timeout_seconds=self._chat_timeout(context)
+                )
+                context.record_usage("PLAN", result.usage)
+                plan = RetrievalPlan.model_validate(result.payload)
+                queries = [query.strip() for query in plan.queries if query.strip()]
+                if not queries:
+                    raise ValidationError.from_exception_data("RetrievalPlan", [])
+                return RetrievalPlan(queries=queries[:1])
+            except (ValidationError, ChatError) as exc:
+                retryable = isinstance(exc, ValidationError) or exc.retryable
+                if retryable and context.consume_retry():
+                    continue
+                raise RunExecutionError("MODEL_FAILED") from exc
+
+    async def _retrieve(
+        self,
+        plan: RetrievalPlan,
+        source_filenames: dict[str, str],
+        context: RunExecutionContext,
+    ) -> list[Evidence]:
+        query = plan.queries[0]
+        while True:
+            try:
+                vector = await self._retrieval.embed(
+                    query, timeout_seconds=self._chat_timeout(context)
+                )
+                break
+            except RetrievalError as exc:
+                if not (exc.retryable and context.consume_retry()):
+                    raise RunExecutionError("RETRIEVAL_FAILED") from exc
+        try:
+            evidence = await self._retrieval.hybrid(
+                query, vector, source_filenames, timeout_seconds=self._chat_timeout(context)
+            )
+        except RetrievalError as exc:
+            raise RunExecutionError("RETRIEVAL_FAILED") from exc
+        while True:
+            try:
+                return await self._retrieval.rerank(
+                    query, evidence, timeout_seconds=self._chat_timeout(context)
+                )
+            except RetrievalError as exc:
+                if not (exc.retryable and context.consume_retry()):
+                    raise RunExecutionError("RETRIEVAL_FAILED") from exc
+
+    async def _verify(
+        self, plan: RetrievalPlan, evidence: list[Evidence], context: RunExecutionContext
+    ) -> VerificationDecision:
+        evidence_text = "\n\n".join(
+            f"来源：{item.filename} 页码：{','.join(map(str, item.pages))}\n{item.text}"
+            for item in evidence
+        )
+        messages = [
+            ChatMessage(
+                "system",
+                "核验证据是否足以回答问题。只返回 JSON："
+                "{\"coverage\":\"FULL|NONE\",\"missing_facts\":[\"...\"]}。",
+            ),
+            ChatMessage("user", f"问题：{plan.queries[0]}\n证据：\n{evidence_text}"),
+        ]
+        while True:
+            try:
+                result = await self._chat.complete_json(
+                    messages, timeout_seconds=self._chat_timeout(context)
+                )
+                context.record_usage("VERIFY", result.usage)
+                return VerificationDecision.model_validate(result.payload)
+            except (ValidationError, ChatError) as exc:
+                retryable = isinstance(exc, ValidationError) or exc.retryable
+                if retryable and context.consume_retry():
+                    continue
+                raise RunExecutionError("MODEL_FAILED") from exc
+
+    async def _generate_grounded(
+        self,
+        prepared: PreparedContext,
+        content: str,
+        decision: RouteDecision,
+        evidence: list[Evidence],
+        context: RunExecutionContext,
+    ) -> AsyncIterator[str]:
+        evidence_text = "\n\n".join(
+            f"{item.filename} 第 {','.join(map(str, item.pages))} 页：{item.text}"
+            for item in evidence
+        )
+        messages = [
+            ChatMessage("system", "只根据给定 PDF 证据回答，不补充通用知识，不输出引用标记。"),
+            *prepared.chat_messages(content),
+            ChatMessage(
+                "system",
+                f"独立问题：{decision.standalone_question}\n证据：\n{evidence_text}",
+            ),
+        ]
+        async for event in self._chat.stream_text(
+            messages, timeout_seconds=self._chat_timeout(context)
+        ):
+            if isinstance(event, ChatStreamUsage):
+                context.record_usage("ANSWER", event.usage)
+            else:
+                yield event.delta
+
+    @staticmethod
+    def _citations(evidence: list[Evidence]) -> list[dict[str, object]]:
+        citations: list[dict[str, object]] = []
+        for item in evidence:
+            current = next(
+                (citation for citation in citations if citation["source_id"] == item.source_id),
+                None,
+            )
+            if current is None:
+                citations.append(
+                    {
+                        "source_type": item.source_type,
+                        "source_id": item.source_id,
+                        "filename": item.filename,
+                        "pages": list(item.pages[:5]),
+                    }
+                )
+            else:
+                raw_pages = current.get("pages")
+                pages = (
+                    [page for page in cast(list[object], raw_pages) if isinstance(page, int)]
+                    if isinstance(raw_pages, list)
+                    else []
+                )
+                current["pages"] = list(dict.fromkeys(pages + list(item.pages)))[:5]
+        return citations
 
     async def _require_owner(self, actor_id: str, conversation_id: str) -> None:
         async with self._sessions() as session:
@@ -419,9 +661,7 @@ class AnsweringService:
         if visible_id is None:
             raise AppError(404, "NOT_FOUND", "资源不存在")
 
-    async def _prepare(
-        self, conversation_id: str, current_user_message_id: str
-    ) -> PreparedContext:
+    async def _prepare(self, conversation_id: str, current_user_message_id: str) -> PreparedContext:
         async with self._sessions() as session:
             conversation = await session.get(Conversation, conversation_id)
             if conversation is None:
@@ -609,9 +849,7 @@ class AnsweringService:
         now = self._utc_now()
         async with self._sessions() as session, session.begin():
             conversation = await session.scalar(
-                select(Conversation)
-                .where(Conversation.id == conversation_id)
-                .with_for_update()
+                select(Conversation).where(Conversation.id == conversation_id).with_for_update()
             )
             run = await session.get(AgentRun, run_id, with_for_update=True)
             user_message = await session.get(Message, user_message_id)
@@ -640,11 +878,10 @@ class AnsweringService:
             run.finished_at = now
             run.trace_version = self._policy.trace_version
             run.policy_version = self._policy.policy_version
-            run.trace_json = await self._terminal_trace(
-                session, run, context, now, "SUCCEEDED"
-            )
+            run.trace_json = await self._terminal_trace(session, run, context, now, "SUCCEEDED")
             assistant_message.content = context.answer
             assistant_message.status = MessageStatus.COMPLETE
+            assistant_message.citations_json = context.citations
             if earlier_success is None and conversation.title == "新会话":
                 conversation.title = user_message.content[:20]
                 conversation.updated_at = max(
@@ -675,11 +912,10 @@ class AnsweringService:
             run.finished_at = now
             run.trace_version = self._policy.trace_version
             run.policy_version = self._policy.policy_version
-            run.trace_json = await self._terminal_trace(
-                session, run, context, now, error_code
-            )
+            run.trace_json = await self._terminal_trace(session, run, context, now, error_code)
             assistant_message.content = context.answer
             assistant_message.status = MessageStatus.PARTIAL
+            assistant_message.citations_json = []
 
     def _schedule_interruption(
         self,
@@ -768,13 +1004,8 @@ class AnsweringService:
                 )
                 if assistant is not None and assistant.status == MessageStatus.PENDING:
                     assistant.status = MessageStatus.PARTIAL
-                    if (
-                        user_message is not None
-                        and assistant.created_at <= user_message.created_at
-                    ):
-                        assistant.created_at = user_message.created_at + timedelta(
-                            microseconds=1
-                        )
+                    if user_message is not None and assistant.created_at <= user_message.created_at:
+                        assistant.created_at = user_message.created_at + timedelta(microseconds=1)
 
     async def _terminal_trace(
         self,
@@ -796,9 +1027,7 @@ class AnsweringService:
         stage_timings = [
             TraceStageTiming(
                 stage=stage.stage.value,
-                duration_ms=self._duration_ms(
-                    stage.started_at, stage.finished_at or finished_at
-                ),
+                duration_ms=self._duration_ms(stage.started_at, stage.finished_at or finished_at),
             )
             for stage in stages
         ]
@@ -852,14 +1081,14 @@ class AnsweringService:
                 limit=self._policy.limits.max_retries,
                 used=context.retries_used,
             ),
-            termination=(
-                None if termination is None else TraceTermination(reason=termination)
+            retrieval=TraceRetrieval(
+                final_evidence_chunk_count=len(context.evidence),
+                final_evidence_token_count=context.evidence_token_count,
             ),
+            termination=(None if termination is None else TraceTermination(reason=termination)),
         )
 
-    def _append_visible_delta(
-        self, context: RunExecutionContext, delta: str
-    ) -> tuple[str, bool]:
+    def _append_visible_delta(self, context: RunExecutionContext, delta: str) -> tuple[str, bool]:
         remaining = self._policy.limits.max_visible_characters - len(context.answer)
         if remaining <= 0:
             return "", True
@@ -899,14 +1128,29 @@ class AnsweringService:
         return value
 
     @staticmethod
-    def _source_scope(conversation: Conversation) -> dict[str, object]:
+    async def _source_scope(
+        session: AsyncSession, conversation: Conversation
+    ) -> dict[str, object]:
         selected = (
             list(conversation.selected_source_ids_json)
             if conversation.knowledge_mode == KnowledgeMode.SELECTED
             else []
         )
+        attachments = list(
+            (
+                await session.scalars(
+                    select(ConversationAttachment)
+                    .where(
+                        ConversationAttachment.conversation_id == conversation.id,
+                        ConversationAttachment.owner_account_id == conversation.owner_account_id,
+                        ConversationAttachment.status == AttachmentStatus.READY,
+                    )
+                    .order_by(ConversationAttachment.created_at, ConversationAttachment.id)
+                )
+            ).all()
+        )
         return {
-            "attachment_ids": [],
+            "attachment_ids": [item.id for item in attachments],
             "knowledge_source_ids": selected,
             "knowledge_mode": conversation.knowledge_mode.value,
         }

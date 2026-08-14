@@ -6,9 +6,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from knowflow.app.config import Settings
 from knowflow.identity.service import IdentityService
+from knowflow.knowledge.answering.retrieval import AttachmentRetrieval
 from knowflow.knowledge.answering.service import AnsweringService
 from knowflow.knowledge.conversations.service import ConversationService
 from knowflow.knowledge.documents.attachments import AttachmentDocuments
+from knowflow.knowledge.documents.citations import CitationPreview
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,4 +23,6 @@ class AppContainer:
     identity: IdentityService
     conversations: ConversationService
     answering: AnsweringService
+    retrieval: AttachmentRetrieval
     documents: AttachmentDocuments
+    citations: CitationPreview

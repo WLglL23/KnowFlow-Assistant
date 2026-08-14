@@ -56,6 +56,13 @@ class TraceTermination(BaseModel):
     reason: str
 
 
+class TraceRetrieval(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    final_evidence_chunk_count: int
+    final_evidence_token_count: int
+
+
 class RunTraceV1(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -65,6 +72,7 @@ class RunTraceV1(BaseModel):
     usage: TraceUsage
     timing: TraceTiming
     retry: TraceRetry
+    retrieval: TraceRetrieval | None = None
     termination: TraceTermination | None = None
 
     def as_json(self) -> dict[str, object]:

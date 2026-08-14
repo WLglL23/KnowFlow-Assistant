@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     embedding_api_key: SecretStr | None = None
     embedding_model: str | None = None
     embedding_dimensions: int = 1024
+    rerank_base_url: str | None = None
+    rerank_api_key: SecretStr | None = None
+    rerank_model: str | None = None
     attachment_max_bytes: int = 10_485_760
     document_max_pages: int = 100
     docling_hf_home: str | None = None
@@ -62,7 +65,13 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
-        "chat_base_url", "chat_model", "embedding_base_url", "embedding_model", mode="before"
+        "chat_base_url",
+        "chat_model",
+        "embedding_base_url",
+        "embedding_model",
+        "rerank_base_url",
+        "rerank_model",
+        mode="before",
     )
     @classmethod
     def normalize_optional_text(cls, value: object) -> object:
@@ -72,7 +81,7 @@ class Settings(BaseSettings):
             return None
         return value.strip()
 
-    @field_validator("chat_api_key", "embedding_api_key", mode="before")
+    @field_validator("chat_api_key", "embedding_api_key", "rerank_api_key", mode="before")
     @classmethod
     def normalize_optional_secret(cls, value: object) -> object:
         if isinstance(value, SecretStr):
