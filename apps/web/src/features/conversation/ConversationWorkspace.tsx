@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, BookOpen, Check, ChevronDown, ChevronLeft, LogOut, MessageSquare, PanelLeft, Pencil, Plus, X } from "lucide-react";
+import { AlertCircle, BookOpen, Check, ChevronDown, ChevronLeft, Library, LogOut, MessageSquare, PanelLeft, Pencil, Plus, X } from "lucide-react";
 import Markdown from "react-markdown";
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 
 import { ApiError, type Account } from "../../api/auth";
 import { createConversation, getConversation, listConversations, renameConversation, streamRun, type Citation, type Conversation, type RunEvent } from "../../api/conversations";
 import type { CitationSelection } from "../citations/CitationPreviewPanel";
+import { KnowledgeSubmissionsWorkspace } from "../knowledge/submissions/KnowledgeSubmissionsWorkspace";
 import { ConversationComposer } from "./ConversationComposer";
 
 const CitationPreviewPanel = lazy(async () => ({
@@ -72,7 +73,19 @@ function MessageCitations({ messageId, citations, onSelect }: { messageId: strin
   );
 }
 
-export function ConversationWorkspace({ account, onLogout }: { account: Account; onLogout: () => void }) {
+type WorkspaceView = "conversations" | "knowledge";
+
+export function ConversationWorkspace({
+  account,
+  activeView,
+  onNavigate,
+  onLogout,
+}: {
+  account: Account;
+  activeView: WorkspaceView;
+  onNavigate: (view: WorkspaceView) => void;
+  onLogout: () => void;
+}) {
   const client = useQueryClient();
   const [collapsed, setCollapsed] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -87,8 +100,8 @@ export function ConversationWorkspace({ account, onLogout }: { account: Account;
 
   const conversationListKey = ["conversations", account.id] as const;
   const conversationDetailKey = ["conversation", account.id, selectedId] as const;
-  const conversations = useQuery({ queryKey: conversationListKey, queryFn: listConversations });
-  const detail = useQuery({ queryKey: conversationDetailKey, queryFn: () => getConversation(selectedId as string), enabled: selectedId !== null });
+  const conversations = useQuery({ queryKey: conversationListKey, queryFn: listConversations, enabled: activeView === "conversations" });
+  const detail = useQuery({ queryKey: conversationDetailKey, queryFn: () => getConversation(selectedId as string), enabled: activeView === "conversations" && selectedId !== null });
 
   useEffect(() => {
     setSelectedId(null);
@@ -100,6 +113,10 @@ export function ConversationWorkspace({ account, onLogout }: { account: Account;
   useEffect(() => {
     setCitationSelection(null);
   }, [selectedId]);
+
+  useEffect(() => {
+    if (activeView === "knowledge") setCitationSelection(null);
+  }, [activeView]);
 
   useEffect(() => {
     if (selectedId === null && conversations.data?.items[0]) setSelectedId(conversations.data.items[0].id);
@@ -177,14 +194,19 @@ export function ConversationWorkspace({ account, onLogout }: { account: Account;
         </div>
 
         <nav className="workspace-nav" aria-label="主导航">
-          <div className="nav-item active" aria-current="page">
-            <span className="nav-indicator" aria-hidden="true" />
+          <button className={`nav-item ${activeView === "conversations" ? "active" : ""}`} type="button" onClick={() => onNavigate("conversations")} aria-current={activeView === "conversations" ? "page" : undefined}>
+            {activeView === "conversations" && <span className="nav-indicator" aria-hidden="true" />}
             <MessageSquare size={18} aria-hidden="true" />
             <span className="nav-copy">对话</span>
-          </div>
+          </button>
+          <button className={`nav-item ${activeView === "knowledge" ? "active" : ""}`} type="button" onClick={() => onNavigate("knowledge")} aria-current={activeView === "knowledge" ? "page" : undefined}>
+            {activeView === "knowledge" && <span className="nav-indicator" aria-hidden="true" />}
+            <Library size={18} aria-hidden="true" />
+            <span className="nav-copy">知识投稿</span>
+          </button>
         </nav>
 
-        <div className="sidebar-conversations">
+        {activeView === "conversations" && <div className="sidebar-conversations">
           <div className="conversation-list-header">
             <h2>会话</h2>
             <button className="icon-button" type="button" onClick={() => { setError(null); createMutation.mutate(); }} disabled={streaming || createMutation.isPending} aria-label="创建会话" title="创建会话"><Plus size={18} /></button>
@@ -193,7 +215,8 @@ export function ConversationWorkspace({ account, onLogout }: { account: Account;
         {conversations.isError && <div className="query-error" role="alert"><AlertCircle size={17} />{errorMessage(conversations.error)}<button type="button" onClick={() => void conversations.refetch()}>重试</button></div>}
         {!conversations.isPending && !conversations.isError && conversations.data?.items.length === 0 && <p className="empty-state">还没有会话，创建一个开始对话</p>}
         <div className="conversation-items">{conversations.data?.items.map((item) => <button key={item.id} className={`conversation-item ${item.id === selectedId ? "selected" : ""}`} type="button" onClick={() => setSelectedId(item.id)} disabled={streaming}><MessageSquare size={16} /><span><strong>{item.title}</strong><small>{formatTime(item.updated_at)}</small></span></button>)}</div>
-        </div>
+        </div>}
+        {activeView === "knowledge" && <div className="sidebar-spacer" />}
 
         <div className="workspace-profile">
           <div className="avatar" aria-hidden="true">{initial}</div>
@@ -207,6 +230,11 @@ export function ConversationWorkspace({ account, onLogout }: { account: Account;
         </div>
       </aside>
 
+      {activeView === "knowledge" ? (
+        <section className="workspace-main">
+          <KnowledgeSubmissionsWorkspace account={account} />
+        </section>
+      ) : (
       <section className={`workspace-main conversation-workbench ${citationSelection ? "preview-open" : ""}`}>
       <section className="conversation-panel">
         {selected && <header className="conversation-header"><div>{editing ? <div className="title-edit"><input value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") saveTitle(); if (event.key === "Escape") setEditing(false); }} autoFocus /><button className="icon-button" type="button" onClick={saveTitle} disabled={renameMutation.isPending} aria-label="保存标题"><Check size={17} /></button><button className="icon-button" type="button" onClick={() => setEditing(false)} disabled={renameMutation.isPending} aria-label="取消重命名"><X size={17} /></button></div> : <div className="title-row"><h2>{detail.data?.title ?? selected.title}</h2><button className="icon-button" type="button" onClick={() => { setTitleDraft(detail.data?.title ?? selected.title); setError(null); setEditing(true); }} aria-label="重命名会话" title="重命名"><Pencil size={16} /></button></div>}</div> </header>}
@@ -223,6 +251,7 @@ export function ConversationWorkspace({ account, onLogout }: { account: Account;
       </section>
       {citationSelection && <Suspense fallback={<aside className="citation-panel"><div className="citation-state">正在打开引用预览…</div></aside>}><CitationPreviewPanel selection={citationSelection} onClose={() => setCitationSelection(null)} /></Suspense>}
       </section>
+      )}
     </main>
   );
 }
