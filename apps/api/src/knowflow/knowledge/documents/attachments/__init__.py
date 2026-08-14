@@ -2,21 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import hmac
-import io
-import os
-import threading
 import uuid
 from datetime import UTC, datetime
 from typing import Any, cast
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 import httpx
-from docling.datamodel.base_models import InputFormat
-from docling.datamodel.pipeline_options import PdfPipelineOptions
-from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling_core.transforms.chunker.hybrid_chunker import HybridChunker
-from docling_core.types.io import DocumentStream
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -29,6 +21,8 @@ from knowflow.knowledge.documents.models import (
     ConversationAttachment,
     ProcessingStage,
 )
+from knowflow.knowledge.documents.object_store import PrivateObjectStore
+from knowflow.knowledge.documents.pdf import PdfDocuments
 from knowflow.knowledge.documents.schemas import (
     AttachmentListResponse,
     AttachmentResponse,
@@ -39,21 +33,20 @@ from knowflow.knowledge.documents.schemas import (
 class AttachmentDocuments:
     """Conversation attachment capability exposed by the composition root."""
 
-    def __init__(self, sessions: async_sessionmaker[AsyncSession], settings: Settings) -> None:
+    def __init__(
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        settings: Settings,
+        pdf: PdfDocuments,
+        objects: PrivateObjectStore,
+    ) -> None:
         self._sessions = sessions
         self._settings = settings
+        self._pdf = pdf
+        self._objects = objects
         self._workers: list[asyncio.Task[None]] = []
         self._wake = asyncio.Event()
         self._stopping = False
-        self._converter_lock = threading.Lock()
-        if settings.docling_hf_home:
-            os.environ.setdefault("HF_HOME", settings.docling_hf_home)
-            os.environ.setdefault("HF_HUB_OFFLINE", "1")
-        options = PdfPipelineOptions(do_ocr=False, do_table_structure=False)
-        cast(Any, options.layout_options).engine_options.compile_model = False
-        self._converter = DocumentConverter(
-            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)}
-        )
 
     async def start(self) -> None:
         if self._workers:
@@ -101,7 +94,12 @@ class AttachmentDocuments:
         content_type: str,
         content: bytes,
     ) -> tuple[int, AttachmentUploadResponse]:
-        page_count = await self._validate_pdf(filename, content_type, content)
+        page_count = await self._pdf.validate(
+            filename,
+            content_type,
+            content,
+            max_bytes=self._settings.attachment_max_bytes,
+        )
         digest = hashlib.sha256(content).hexdigest()
         now = datetime.now(UTC).replace(tzinfo=None)
         attachment: ConversationAttachment | None = None
@@ -194,7 +192,7 @@ class AttachmentDocuments:
         assert attachment is not None
         response_attachment = AttachmentResponse.from_model(attachment)
         if result in {"CREATED", "RETRY_QUEUED"}:
-            await self._put_object(attachment.object_key, content)
+            await self._objects.put(attachment.object_key, content)
             await self._ensure_index()
         return status_code, AttachmentUploadResponse(
             result=result,  # type: ignore[arg-type]
@@ -243,36 +241,6 @@ class AttachmentDocuments:
         ):
             raise AppError(404, "NOT_FOUND", "资源不存在")
 
-    async def _validate_pdf(self, filename: str, content_type: str, content: bytes) -> int:
-        if len(content) > self._settings.attachment_max_bytes:
-            raise AppError(413, "DOCUMENT_TOO_LARGE", "文档超过限制", {"reason": "BYTES_EXCEEDED"})
-        if content_type != "application/pdf":
-            raise AppError(422, "INVALID_PDF", "PDF 无效", {"reason": "MIME_MISMATCH"})
-        if not filename.lower().endswith(".pdf"):
-            raise AppError(422, "INVALID_PDF", "PDF 无效", {"reason": "EXTENSION_INVALID"})
-        if not content.startswith(b"%PDF-"):
-            raise AppError(422, "INVALID_PDF", "PDF 无效", {"reason": "SIGNATURE_INVALID"})
-        if b"/Encrypt" in content:
-            raise AppError(
-                422,
-                "INVALID_PDF",
-                "PDF 无效",
-                {"reason": "PASSWORD_PROTECTED"},
-            )
-        try:
-            document = await asyncio.to_thread(self._convert_pdf, filename, content)
-            pages = len(document.pages)
-        except AppError:
-            raise
-        except Exception as exc:
-            reason = "PAGE_COUNT_UNREADABLE" if b"/Type /Catalog" in content else "CORRUPT"
-            raise AppError(422, "INVALID_PDF", "PDF 无效", {"reason": reason}) from exc
-        if pages == 0:
-            raise AppError(422, "INVALID_PDF", "PDF 无效", {"reason": "PAGE_COUNT_UNREADABLE"})
-        if pages > self._settings.document_max_pages:
-            raise AppError(413, "DOCUMENT_TOO_LARGE", "文档超过限制", {"reason": "PAGES_EXCEEDED"})
-        return pages
-
     async def _worker(self) -> None:
         while True:
             if self._stopping:
@@ -313,9 +281,9 @@ class AttachmentDocuments:
             async with self._sessions() as session:
                 item = await session.get(ConversationAttachment, attachment_id)
                 assert item is not None
-                content = await self._get_object(item.object_key)
+                content = await self._objects.get(item.object_key)
                 digest = item.content_sha256
-            document = await asyncio.to_thread(self._convert_pdf, item.filename, content)
+            document = await asyncio.to_thread(self._pdf.convert, item.filename, content)
             await self._progress(attachment_id, ProcessingStage.CHUNKING, 35)
             chunks = await asyncio.to_thread(self._chunk_document, document)
             await self._progress(attachment_id, ProcessingStage.EMBEDDING, 60)
@@ -343,14 +311,6 @@ class AttachmentDocuments:
                     item.processing_progress = 100
                 item.processing_error_code = None if success else "ATTACHMENT_PROCESSING_FAILED"
                 item.processed_at = datetime.now(UTC).replace(tzinfo=None)
-
-    def _convert_pdf(self, filename: str, content: bytes):  # type: ignore[no-untyped-def]
-        # Docling's converter owns model state; keep concurrent queue workers from sharing it.
-        with self._converter_lock:
-            result = self._converter.convert(
-                DocumentStream(name=filename, stream=io.BytesIO(content))
-            )
-        return result.document
 
     @staticmethod
     def _chunk_document(document: object) -> list[tuple[list[int], str]]:
@@ -457,67 +417,5 @@ class AttachmentDocuments:
             if response.status_code not in {200, 400}:
                 response.raise_for_status()
 
-    def _s3_headers(self, method: str, path: str, payload: bytes) -> dict[str, str]:
-        parsed = urlsplit(self._settings.minio_endpoint)
-        now = datetime.now(UTC)
-        stamp = now.strftime("%Y%m%dT%H%M%SZ")
-        date = now.strftime("%Y%m%d")
-        payload_hash = hashlib.sha256(payload).hexdigest()
-        canonical_headers = (
-            f"host:{parsed.netloc}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{stamp}\n"
-        )
-        signed = "host;x-amz-content-sha256;x-amz-date"
-        request = "\n".join([method, path, "", canonical_headers, signed, payload_hash])
-        scope = f"{date}/us-east-1/s3/aws4_request"
-        to_sign = "\n".join(
-            ["AWS4-HMAC-SHA256", stamp, scope, hashlib.sha256(request.encode()).hexdigest()]
-        )
-        key = hmac.new(
-            f"AWS4{self._settings.minio_secret_key.get_secret_value()}".encode(),
-            date.encode(),
-            hashlib.sha256,
-        ).digest()
-        for value in ("us-east-1", "s3", "aws4_request"):
-            key = hmac.new(key, value.encode(), hashlib.sha256).digest()
-        signature = hmac.new(key, to_sign.encode(), hashlib.sha256).hexdigest()
-        authorization = (
-            "AWS4-HMAC-SHA256 "
-            f"Credential={self._settings.minio_access_key}/{scope},"
-            f"SignedHeaders={signed},Signature={signature}"
-        )
-        return {
-            "x-amz-content-sha256": payload_hash,
-            "x-amz-date": stamp,
-            "Authorization": authorization,
-        }
-
-    async def _put_object(self, key: str, content: bytes) -> None:
-        bucket = quote(self._settings.minio_bucket, safe="")
-        base = self._settings.minio_endpoint.rstrip("/")
-        async with httpx.AsyncClient(timeout=10) as client:
-            bucket_path = f"/{bucket}"
-            response = await client.put(
-                f"{base}{bucket_path}",
-                headers=self._s3_headers("PUT", bucket_path, b""),
-                content=b"",
-            )
-            if response.status_code not in {200, 409}:
-                response.raise_for_status()
-            path = f"/{bucket}/{quote(key, safe='/')}"
-            response = await client.put(
-                f"{base}{path}", headers=self._s3_headers("PUT", path, content), content=content
-            )
-            response.raise_for_status()
-
-    async def _get_object(self, key: str) -> bytes:
-        path = f"/{quote(self._settings.minio_bucket, safe='')}/{quote(key, safe='/')}"
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(
-                f"{self._settings.minio_endpoint.rstrip('/')}{path}",
-                headers=self._s3_headers("GET", path, b""),
-            )
-            response.raise_for_status()
-            return response.content
-
     async def read_source_object(self, key: str) -> bytes:
-        return await self._get_object(key)
+        return await self._objects.get(key)
