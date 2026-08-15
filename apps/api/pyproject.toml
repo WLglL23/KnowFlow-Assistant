@@ -51,3 +51,8 @@ venv = ".venv"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+  "targeted: fast deterministic feedback for one current seam",
+  "integration: uses real MySQL, MinIO, or Elasticsearch",
+  "slow: exercises Docling, concurrency waits, startup recovery, or full publication paths",
+]
