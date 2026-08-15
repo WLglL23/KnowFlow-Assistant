@@ -34,6 +34,10 @@ from knowflow.knowledge.documents.api import router as documents_router
 from knowflow.knowledge.documents.attachments import AttachmentDocuments
 from knowflow.knowledge.documents.citations import CitationPreview
 from knowflow.knowledge.documents.citations.api import router as citation_router
+from knowflow.knowledge.documents.object_store import PrivateObjectStore
+from knowflow.knowledge.documents.pdf import PdfDocuments
+from knowflow.knowledge.documents.submissions import SubmissionDocuments
+from knowflow.knowledge.documents.submissions.api import router as submissions_router
 
 
 class RequestIdMiddleware:
@@ -103,7 +107,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         core_experimental_policy(resolved_settings.run_deadline_seconds),
         retrieval,
     )
-    documents = AttachmentDocuments(sessions, resolved_settings)
+    pdf = PdfDocuments(resolved_settings)
+    objects = PrivateObjectStore(resolved_settings)
+    documents = AttachmentDocuments(sessions, resolved_settings, pdf, objects)
+    submissions = SubmissionDocuments(sessions, resolved_settings, pdf, objects)
     citations = CitationPreview(sessions, documents)
     container = AppContainer(
         settings=resolved_settings,
@@ -114,6 +121,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         answering=answering,
         retrieval=retrieval,
         documents=documents,
+        submissions=submissions,
         citations=citations,
     )
 
@@ -148,4 +156,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(answering_router)
     app.include_router(documents_router)
     app.include_router(citation_router)
+    app.include_router(submissions_router)
     return app

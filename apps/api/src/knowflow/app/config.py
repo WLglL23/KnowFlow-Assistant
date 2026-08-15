@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     rerank_api_key: SecretStr | None = None
     rerank_model: str | None = None
     attachment_max_bytes: int = 10_485_760
+    submission_max_bytes: int = 20_971_520
     document_max_pages: int = 100
     docling_hf_home: str | None = None
 

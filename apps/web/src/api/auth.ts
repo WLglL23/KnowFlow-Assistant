@@ -35,6 +35,7 @@ export class ApiError extends Error {
     readonly code: string,
     message: string,
     readonly requestId?: string,
+    readonly details?: { reason?: string },
   ) {
     super(message);
     this.name = "ApiError";

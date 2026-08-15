@@ -11,6 +11,7 @@ from knowflow.knowledge.answering.service import AnsweringService
 from knowflow.knowledge.conversations.service import ConversationService
 from knowflow.knowledge.documents.attachments import AttachmentDocuments
 from knowflow.knowledge.documents.citations import CitationPreview
+from knowflow.knowledge.documents.submissions import SubmissionDocuments
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,4 +26,5 @@ class AppContainer:
     answering: AnsweringService
     retrieval: AttachmentRetrieval
     documents: AttachmentDocuments
+    submissions: SubmissionDocuments
     citations: CitationPreview
