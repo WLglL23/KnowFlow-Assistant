@@ -37,6 +37,7 @@ from knowflow.knowledge.documents.citations.api import router as citation_router
 from knowflow.knowledge.documents.object_store import PrivateObjectStore
 from knowflow.knowledge.documents.pdf import PdfDocuments
 from knowflow.knowledge.documents.submissions import SubmissionDocuments
+from knowflow.knowledge.documents.submissions.admin_api import router as admin_submissions_router
 from knowflow.knowledge.documents.submissions.api import router as submissions_router
 
 
@@ -157,4 +158,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(documents_router)
     app.include_router(citation_router)
     app.include_router(submissions_router)
+    app.include_router(admin_submissions_router)
     return app
