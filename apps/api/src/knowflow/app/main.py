@@ -36,6 +36,8 @@ from knowflow.knowledge.documents.citations import CitationPreview
 from knowflow.knowledge.documents.citations.api import router as citation_router
 from knowflow.knowledge.documents.object_store import PrivateObjectStore
 from knowflow.knowledge.documents.pdf import PdfDocuments
+from knowflow.knowledge.documents.publication import PublicationDocuments
+from knowflow.knowledge.documents.publication.api import router as publication_router
 from knowflow.knowledge.documents.submissions import SubmissionDocuments
 from knowflow.knowledge.documents.submissions.admin_api import router as admin_submissions_router
 from knowflow.knowledge.documents.submissions.api import router as submissions_router
@@ -112,6 +114,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     objects = PrivateObjectStore(resolved_settings)
     documents = AttachmentDocuments(sessions, resolved_settings, pdf, objects)
     submissions = SubmissionDocuments(sessions, resolved_settings, pdf, objects)
+    publication = PublicationDocuments(sessions, resolved_settings, pdf, objects)
     citations = CitationPreview(sessions, documents)
     container = AppContainer(
         settings=resolved_settings,
@@ -123,6 +126,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         retrieval=retrieval,
         documents=documents,
         submissions=submissions,
+        publication=publication,
         citations=citations,
     )
 
@@ -135,6 +139,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await documents.start()
             yield
         finally:
+            await publication.stop()
             await documents.stop()
             await engine.dispose()
 
@@ -159,4 +164,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(citation_router)
     app.include_router(submissions_router)
     app.include_router(admin_submissions_router)
+    app.include_router(publication_router)
     return app

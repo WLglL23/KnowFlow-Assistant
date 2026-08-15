@@ -74,6 +74,7 @@ function AppRoutes() {
       <Route path="/login" element={<LoginRoute />} />
       <Route path="/" element={<ProtectedWorkspace />} />
       <Route path="/knowledge" element={<ProtectedWorkspace />} />
+      <Route path="/admin/knowledge" element={<ProtectedWorkspace />} />
       <Route
         path="*"
         element={<Navigate to={status === "authenticated" ? "/" : "/login"} replace />}

@@ -21,11 +21,11 @@ def require_admin(account: AccountResponse) -> None:
 
 
 @router.get("", response_model=SubmissionListResponse)
-async def list_pending_submissions(
+async def list_admin_submissions(
     request: Request, account: CurrentAccount
 ) -> SubmissionListResponse:
     require_admin(account)
-    return await request.app.state.container.submissions.list_pending_review()
+    return await request.app.state.container.submissions.list_for_admin()
 
 
 @router.get("/{submission_id}/document")
@@ -55,3 +55,13 @@ async def reject_submission(
 ) -> SubmissionResponse:
     require_admin(account)
     return await request.app.state.container.submissions.reject(submission_id, account.id)
+
+
+@router.post("/{submission_id}/approve", response_model=SubmissionResponse)
+async def approve_submission(
+    submission_id: str,
+    request: Request,
+    account: CurrentAccount,
+) -> SubmissionResponse:
+    require_admin(account)
+    return await request.app.state.container.publication.approve(submission_id, account.id)

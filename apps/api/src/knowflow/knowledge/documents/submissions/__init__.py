@@ -70,6 +70,14 @@ class SubmissionDocuments:
             processing_progress=None,
             processing_error_code=None,
             active_content_sha256=None,
+            enabled=True,
+            disabled_at=None,
+            es_cleanup_status=None,
+            es_cleanup_error_code=None,
+            es_cleanup_failed_at=None,
+            minio_cleanup_status=None,
+            minio_cleanup_error_code=None,
+            minio_cleanup_failed_at=None,
             created_at=now,
             reviewed_at=None,
             published_at=None,
@@ -111,15 +119,11 @@ class SubmissionDocuments:
             ).all()
         return SubmissionListResponse(items=[SubmissionResponse.from_model(item) for item in items])
 
-    async def list_pending_review(self) -> SubmissionListResponse:
+    async def list_for_admin(self) -> SubmissionListResponse:
         async with self._sessions() as session:
             items = (
                 await session.scalars(
                     select(KnowledgeSubmission)
-                    .where(
-                        KnowledgeSubmission.status
-                        == KnowledgeSubmissionStatus.PENDING_REVIEW
-                    )
                     .order_by(
                         KnowledgeSubmission.created_at.desc(),
                         KnowledgeSubmission.id.desc(),

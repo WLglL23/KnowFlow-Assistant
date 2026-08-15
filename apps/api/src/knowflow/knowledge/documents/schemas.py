@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, StrictBool
 
 from knowflow.knowledge.documents.models import ConversationAttachment, KnowledgeSubmission
 
@@ -61,3 +61,24 @@ class SubmissionUploadResponse(BaseModel):
 
 class SubmissionListResponse(BaseModel):
     items: list[SubmissionResponse]
+
+
+class KnowledgeSourceResponse(BaseModel):
+    id: str
+    filename: str
+    status: str
+    enabled: bool
+
+    @classmethod
+    def from_model(cls, value: KnowledgeSubmission) -> KnowledgeSourceResponse:
+        return cls.model_validate({name: getattr(value, name) for name in cls.model_fields})
+
+
+class KnowledgeSourceListResponse(BaseModel):
+    items: list[KnowledgeSourceResponse]
+
+
+class KnowledgeSourceUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: StrictBool

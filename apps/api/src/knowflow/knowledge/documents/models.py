@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import Enum, ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, Enum, ForeignKey, Index, Integer, String, UniqueConstraint, text
 from sqlalchemy.dialects.mysql import DATETIME
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -30,6 +30,13 @@ class KnowledgeSubmissionStatus(StrEnum):
     PUBLISHED = "PUBLISHED"
     PUBLISH_FAILED = "PUBLISH_FAILED"
     REJECTED = "REJECTED"
+
+
+class CleanupStatus(StrEnum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
 
 
 class ConversationAttachment(Base):
@@ -90,6 +97,20 @@ class KnowledgeSubmission(Base):
     processing_progress: Mapped[int | None] = mapped_column(Integer, nullable=True)
     processing_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     active_content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("1"))
+    disabled_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    es_cleanup_status: Mapped[CleanupStatus | None] = mapped_column(
+        Enum(CleanupStatus, native_enum=True), nullable=True
+    )
+    es_cleanup_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    es_cleanup_failed_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    minio_cleanup_status: Mapped[CleanupStatus | None] = mapped_column(
+        Enum(CleanupStatus, native_enum=True), nullable=True
+    )
+    minio_cleanup_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    minio_cleanup_failed_at: Mapped[datetime | None] = mapped_column(
+        DATETIME(fsp=6), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6))
     reviewed_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)

@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, BookOpen, Check, ChevronDown, ChevronLeft, Library, LogOut, MessageSquare, PanelLeft, Pencil, Plus, X } from "lucide-react";
+import { AlertCircle, BookOpen, Check, ChevronDown, ChevronLeft, FileCheck2, Library, LogOut, MessageSquare, PanelLeft, Pencil, Plus, X } from "lucide-react";
 import Markdown from "react-markdown";
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 
 import { ApiError, type Account } from "../../api/auth";
 import { createConversation, getConversation, listConversations, renameConversation, streamRun, type Citation, type Conversation, type RunEvent } from "../../api/conversations";
+import { KnowledgeAdminWorkspace } from "../admin/knowledge/KnowledgeAdminWorkspace";
 import type { CitationSelection } from "../citations/CitationPreviewPanel";
 import { KnowledgeSubmissionsWorkspace } from "../knowledge/submissions/KnowledgeSubmissionsWorkspace";
 import { ConversationComposer } from "./ConversationComposer";
@@ -73,7 +74,7 @@ function MessageCitations({ messageId, citations, onSelect }: { messageId: strin
   );
 }
 
-type WorkspaceView = "conversations" | "knowledge";
+type WorkspaceView = "conversations" | "knowledge" | "adminKnowledge";
 
 export function ConversationWorkspace({
   account,
@@ -115,7 +116,7 @@ export function ConversationWorkspace({
   }, [selectedId]);
 
   useEffect(() => {
-    if (activeView === "knowledge") setCitationSelection(null);
+    if (activeView !== "conversations") setCitationSelection(null);
   }, [activeView]);
 
   useEffect(() => {
@@ -204,6 +205,13 @@ export function ConversationWorkspace({
             <Library size={18} aria-hidden="true" />
             <span className="nav-copy">知识投稿</span>
           </button>
+          {account.role === "ADMIN" && (
+            <button className={`nav-item ${activeView === "adminKnowledge" ? "active" : ""}`} type="button" onClick={() => onNavigate("adminKnowledge")} aria-current={activeView === "adminKnowledge" ? "page" : undefined} aria-label="Knowledge 管理">
+              {activeView === "adminKnowledge" && <span className="nav-indicator" aria-hidden="true" />}
+              <FileCheck2 size={18} aria-hidden="true" />
+              <span className="nav-copy">知识管理</span>
+            </button>
+          )}
         </nav>
 
         {activeView === "conversations" && <div className="sidebar-conversations">
@@ -216,7 +224,7 @@ export function ConversationWorkspace({
         {!conversations.isPending && !conversations.isError && conversations.data?.items.length === 0 && <p className="empty-state">还没有会话，创建一个开始对话</p>}
         <div className="conversation-items">{conversations.data?.items.map((item) => <button key={item.id} className={`conversation-item ${item.id === selectedId ? "selected" : ""}`} type="button" onClick={() => setSelectedId(item.id)} disabled={streaming}><MessageSquare size={16} /><span><strong>{item.title}</strong><small>{formatTime(item.updated_at)}</small></span></button>)}</div>
         </div>}
-        {activeView === "knowledge" && <div className="sidebar-spacer" />}
+        {activeView !== "conversations" && <div className="sidebar-spacer" />}
 
         <div className="workspace-profile">
           <div className="avatar" aria-hidden="true">{initial}</div>
@@ -233,6 +241,10 @@ export function ConversationWorkspace({
       {activeView === "knowledge" ? (
         <section className="workspace-main">
           <KnowledgeSubmissionsWorkspace account={account} />
+        </section>
+      ) : activeView === "adminKnowledge" ? (
+        <section className="workspace-main">
+          <KnowledgeAdminWorkspace />
         </section>
       ) : (
       <section className={`workspace-main conversation-workbench ${citationSelection ? "preview-open" : ""}`}>
