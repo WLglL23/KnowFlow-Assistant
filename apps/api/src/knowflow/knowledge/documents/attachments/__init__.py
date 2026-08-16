@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from knowflow.app.config import Settings
 from knowflow.app.errors import AppError
-from knowflow.knowledge.conversations.models import Conversation
+from knowflow.knowledge.conversations.models import Conversation, KnowledgeMode
 from knowflow.knowledge.documents.models import (
     AttachmentStatus,
     ConversationAttachment,
@@ -123,6 +123,28 @@ class AttachmentDocuments:
                         ConversationAttachment.content_sha256 == digest,
                     )
                 )
+                selected_count = (
+                    len(conversation.selected_source_ids_json)
+                    if conversation.knowledge_mode == KnowledgeMode.SELECTED
+                    else 0
+                )
+                if attachment is None or attachment.status == AttachmentStatus.FAILED:
+                    active = await session.scalar(
+                        select(func.count())
+                        .select_from(ConversationAttachment)
+                        .where(
+                            ConversationAttachment.conversation_id == conversation_id,
+                            ConversationAttachment.status.in_(
+                                [
+                                    AttachmentStatus.QUEUED,
+                                    AttachmentStatus.PROCESSING,
+                                    AttachmentStatus.READY,
+                                ]
+                            ),
+                        )
+                    )
+                    if (active or 0) + selected_count >= 5:
+                        raise AppError(409, "SOURCE_LIMIT_EXCEEDED", "来源数量已达到上限")
                 if attachment is not None:
                     result = {
                         AttachmentStatus.QUEUED: "EXISTING_QUEUED",
@@ -141,22 +163,6 @@ class AttachmentDocuments:
                         attachment.processed_at = None
                         attachment.updated_at = now
                 else:
-                    active = await session.scalar(
-                        select(func.count())
-                        .select_from(ConversationAttachment)
-                        .where(
-                            ConversationAttachment.conversation_id == conversation_id,
-                            ConversationAttachment.status.in_(
-                                [
-                                    AttachmentStatus.QUEUED,
-                                    AttachmentStatus.PROCESSING,
-                                    AttachmentStatus.READY,
-                                ]
-                            ),
-                        )
-                    )
-                    if active is not None and active >= 5:
-                        raise AppError(409, "SOURCE_LIMIT_EXCEEDED", "来源数量已达到上限")
                     attachment_id = f"att_{uuid.uuid4().hex}"
                     attachment = ConversationAttachment(
                         id=attachment_id,

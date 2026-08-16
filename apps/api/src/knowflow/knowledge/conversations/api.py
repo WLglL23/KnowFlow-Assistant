@@ -40,12 +40,16 @@ async def get_conversation(
 
 
 @router.patch("/{conversation_id}", response_model=ConversationResponse)
-async def rename_conversation(
+async def update_conversation(
     conversation_id: str,
     payload: ConversationPatchRequest,
     request: Request,
     account: CurrentAccount,
 ) -> ConversationResponse:
-    return await container_for(request).conversations.rename(
-        conversation_id, account.id, payload.title
+    return await container_for(request).conversations.update(
+        conversation_id,
+        account.id,
+        title=payload.title,
+        knowledge_mode=payload.knowledge_mode,
+        selected_source_ids=payload.selected_source_ids,
     )

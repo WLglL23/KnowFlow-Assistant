@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta, timezone
 
-from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, field_serializer, field_validator, model_validator
 
 from knowflow.knowledge.answering.models import Message, MessageRole, MessageStatus
 from knowflow.knowledge.conversations.models import Conversation, KnowledgeMode
@@ -73,12 +73,38 @@ class ConversationDetailResponse(ConversationResponse):
 class ConversationPatchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    title: str
+    title: str | None = None
+    knowledge_mode: KnowledgeMode | None = None
+    selected_source_ids: list[str] | None = None
 
     @field_validator("title")
     @classmethod
-    def normalize_title(cls, value: str) -> str:
+    def normalize_title(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
         normalized = value.strip()
         if not 1 <= len(normalized) <= 100:
             raise ValueError("title must contain 1 to 100 characters")
         return normalized
+
+    @model_validator(mode="after")
+    def validate_patch(self) -> ConversationPatchRequest:
+        fields = self.model_fields_set
+        if not fields:
+            raise ValueError("at least one field is required")
+        if "title" in fields and self.title is None:
+            raise ValueError("title cannot be null")
+        scope_fields = {"knowledge_mode", "selected_source_ids"}
+        if fields & scope_fields and not scope_fields <= fields:
+            raise ValueError("knowledge scope fields must be provided together")
+        if scope_fields <= fields:
+            if self.knowledge_mode is None or self.selected_source_ids is None:
+                raise ValueError("knowledge scope fields cannot be null")
+            if len(self.selected_source_ids) != len(set(self.selected_source_ids)):
+                raise ValueError("selected source ids must be unique")
+            if (
+                self.knowledge_mode in {KnowledgeMode.DISABLED, KnowledgeMode.ALL}
+                and self.selected_source_ids
+            ):
+                raise ValueError("disabled and all modes require an empty selection")
+        return self

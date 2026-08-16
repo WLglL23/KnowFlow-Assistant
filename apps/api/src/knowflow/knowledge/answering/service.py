@@ -59,8 +59,9 @@ from knowflow.knowledge.answering.trace import (
     TraceUsageCall,
     TraceVersions,
 )
-from knowflow.knowledge.conversations.models import Conversation, KnowledgeMode
-from knowflow.knowledge.documents.models import AttachmentStatus, ConversationAttachment
+from knowflow.knowledge.conversations.models import Conversation
+from knowflow.knowledge.conversations.service import allowed_source_scope
+from knowflow.knowledge.documents.models import ConversationAttachment
 
 
 class RouteDecision(BaseModel):
@@ -251,7 +252,7 @@ class AnsweringService:
                     client_request_id=normalized_request_id,
                     status=RunStatus.RUNNING,
                     route=None,
-                    source_scope_json=await self._source_scope(session, conversation),
+                    source_scope_json=await allowed_source_scope(session, conversation),
                     trace_version=self._policy.trace_version,
                     policy_version=self._policy.policy_version,
                     trace_json=self._trace_without_stages(
@@ -1126,34 +1127,6 @@ class AnsweringService:
         if parsed.version != 4:
             raise AppError(422, "VALIDATION_FAILED", "请求参数校验失败")
         return value
-
-    @staticmethod
-    async def _source_scope(
-        session: AsyncSession, conversation: Conversation
-    ) -> dict[str, object]:
-        selected = (
-            list(conversation.selected_source_ids_json)
-            if conversation.knowledge_mode == KnowledgeMode.SELECTED
-            else []
-        )
-        attachments = list(
-            (
-                await session.scalars(
-                    select(ConversationAttachment)
-                    .where(
-                        ConversationAttachment.conversation_id == conversation.id,
-                        ConversationAttachment.owner_account_id == conversation.owner_account_id,
-                        ConversationAttachment.status == AttachmentStatus.READY,
-                    )
-                    .order_by(ConversationAttachment.created_at, ConversationAttachment.id)
-                )
-            ).all()
-        )
-        return {
-            "attachment_ids": [item.id for item in attachments],
-            "knowledge_source_ids": selected,
-            "knowledge_mode": conversation.knowledge_mode.value,
-        }
 
     @staticmethod
     def _failed_event(
