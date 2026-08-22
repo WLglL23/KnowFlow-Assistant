@@ -13,18 +13,14 @@ export function AppShell() {
     return <Navigate to="/" replace />;
   }
 
-  const activeView = location.pathname === "/admin/knowledge"
-    ? "adminKnowledge"
-    : location.pathname === "/knowledge"
-      ? "knowledge"
-      : "conversations";
+  const activeView = location.pathname === "/admin/knowledge" ? "adminKnowledge" : "conversations";
 
   return (
     <ConversationWorkspace
       account={account}
       activeView={activeView}
       onNavigate={(view) => navigate(
-        view === "adminKnowledge" ? "/admin/knowledge" : view === "knowledge" ? "/knowledge" : "/",
+        view === "adminKnowledge" ? "/admin/knowledge" : "/",
       )}
       onLogout={logout}
     />

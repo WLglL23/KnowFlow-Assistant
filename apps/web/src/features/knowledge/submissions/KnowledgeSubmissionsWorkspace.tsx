@@ -94,7 +94,7 @@ function SubmissionRow({ submission }: { submission: Submission }) {
   );
 }
 
-export function KnowledgeSubmissionsWorkspace({ account }: { account: Account }) {
+export function KnowledgeSubmissionsWorkspace({ account, compact = false }: { account: Account; compact?: boolean }) {
   const client = useQueryClient();
   const inputRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
@@ -133,7 +133,7 @@ export function KnowledgeSubmissionsWorkspace({ account }: { account: Account })
   }
 
   return (
-    <section className="knowledge-workspace" aria-labelledby="knowledge-heading">
+    <section className={`knowledge-workspace ${compact ? "compact" : ""}`} aria-labelledby="knowledge-heading">
       <header className="knowledge-header">
         <div>
           <span>KNOWLEDGE</span>
@@ -144,13 +144,20 @@ export function KnowledgeSubmissionsWorkspace({ account }: { account: Account })
 
       <div className="knowledge-content">
         <section className="submission-uploader" aria-labelledby="submission-form-heading">
-          <div className="submission-section-heading">
-            <div>
-              <h2 id="submission-form-heading">提交 PDF</h2>
-              <p>单个文件，最大 20 MiB、100 页。文件内容由服务端安全检查。</p>
+          {compact ? (
+            <div className="submission-limitations" id="submission-form-heading">
+              <span>投稿限制</span>
+              <p>仅支持单个 PDF，最大 20 MiB、最多 100 页。文件会经过服务端安全检查。</p>
             </div>
-            <Upload size={20} aria-hidden="true" />
-          </div>
+          ) : (
+            <div className="submission-section-heading">
+              <div>
+                <h2 id="submission-form-heading">提交 PDF</h2>
+                <p>单个文件，最大 20 MiB、100 页。文件内容由服务端安全检查。</p>
+              </div>
+              <Upload size={20} aria-hidden="true" />
+            </div>
+          )}
           <form onSubmit={submit}>
             <label className={`submission-picker ${file ? "has-file" : ""}`}>
               <input ref={inputRef} type="file" accept="application/pdf,.pdf" onChange={chooseFile} disabled={upload.isPending} />

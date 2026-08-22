@@ -1,18 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, Check, ChevronLeft, FileCheck2, Library, LogOut, MessageSquare, PanelLeft, Pencil, Plus, X } from "lucide-react";
+import { AlertCircle, Check, ChevronLeft, FileCheck2, LogOut, MessageSquare, PanelLeft, Pencil, Plus, X } from "lucide-react";
 import Markdown from "react-markdown";
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { ApiError, type Account } from "../../api/auth";
 import { createConversation, getConversation, listConversations, renameConversation, streamRun, type Citation, type Conversation, type RunEvent } from "../../api/conversations";
 import { KnowledgeAdminWorkspace } from "../admin/knowledge/KnowledgeAdminWorkspace";
 import type { CitationSelection } from "../citations/CitationPreviewPanel";
-import { KnowledgeSubmissionsWorkspace } from "../knowledge/submissions/KnowledgeSubmissionsWorkspace";
 import { ConversationComposer } from "./ConversationComposer";
-
-const CitationPreviewPanel = lazy(async () => ({
-  default: (await import("../citations/CitationPreviewPanel")).CitationPreviewPanel,
-}));
+import { KnowledgeContextSidebar } from "./KnowledgeContextSidebar";
 
 function errorMessage(error: unknown): string {
   if (!(error instanceof ApiError)) return "请求未完成，请稍后重试";
@@ -63,7 +59,7 @@ function MessageContent({ messageId, content, citations, onSelect }: { messageId
   })}</>;
 }
 
-type WorkspaceView = "conversations" | "knowledge" | "adminKnowledge";
+type WorkspaceView = "conversations" | "adminKnowledge";
 
 export function ConversationWorkspace({
   account,
@@ -189,11 +185,6 @@ export function ConversationWorkspace({
             <MessageSquare size={18} aria-hidden="true" />
             <span className="nav-copy">对话</span>
           </button>
-          <button className={`nav-item ${activeView === "knowledge" ? "active" : ""}`} type="button" onClick={() => onNavigate("knowledge")} aria-current={activeView === "knowledge" ? "page" : undefined}>
-            {activeView === "knowledge" && <span className="nav-indicator" aria-hidden="true" />}
-            <Library size={18} aria-hidden="true" />
-            <span className="nav-copy">知识投稿</span>
-          </button>
           {account.role === "ADMIN" && (
             <button className={`nav-item ${activeView === "adminKnowledge" ? "active" : ""}`} type="button" onClick={() => onNavigate("adminKnowledge")} aria-current={activeView === "adminKnowledge" ? "page" : undefined} aria-label="Knowledge 管理">
               {activeView === "adminKnowledge" && <span className="nav-indicator" aria-hidden="true" />}
@@ -227,16 +218,12 @@ export function ConversationWorkspace({
         </div>
       </aside>
 
-      {activeView === "knowledge" ? (
-        <section className="workspace-main">
-          <KnowledgeSubmissionsWorkspace account={account} />
-        </section>
-      ) : activeView === "adminKnowledge" ? (
+      {activeView === "adminKnowledge" ? (
         <section className="workspace-main">
           <KnowledgeAdminWorkspace />
         </section>
       ) : (
-      <section className={`workspace-main conversation-workbench ${citationSelection ? "preview-open" : ""}`}>
+      <section className="workspace-main conversation-workbench context-open">
       <section className="conversation-panel">
         {selected && <header className="conversation-header"><div>{editing ? <div className="title-edit"><input value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") saveTitle(); if (event.key === "Escape") setEditing(false); }} autoFocus /><button className="icon-button" type="button" onClick={saveTitle} disabled={renameMutation.isPending} aria-label="保存标题"><Check size={17} /></button><button className="icon-button" type="button" onClick={() => setEditing(false)} disabled={renameMutation.isPending} aria-label="取消重命名"><X size={17} /></button></div> : <div className="title-row"><h2>{detail.data?.title ?? selected.title}</h2><button className="icon-button" type="button" onClick={() => { setTitleDraft(detail.data?.title ?? selected.title); setError(null); setEditing(true); }} aria-label="重命名会话" title="重命名"><Pencil size={16} /></button></div>}</div> </header>}
         <div className="message-flow" aria-live="polite">
@@ -248,9 +235,9 @@ export function ConversationWorkspace({
           {streaming && <article className="message assistant"><div className="message-role">知办助手<span className="streaming-label">{stage ? stageLabels[stage] ?? stage : "等待接受"}</span></div><div className="message-content">{streamText ? <Markdown>{streamText}</Markdown> : <span className="typing-indicator">{stage ? `${stageLabels[stage] ?? stage}…` : "请求已提交，等待服务响应…"}</span>}</div></article>}
         </div>
         {error && <div className="conversation-error" role="alert"><AlertCircle size={17} />{error}</div>}
-        <ConversationComposer accountId={account.id} conversationId={selectedId} draft={draft} streaming={streaming} onDraftChange={setDraft} onSend={() => void send()} />
+        <ConversationComposer accountId={account.id} conversationId={selectedId} knowledgeMode={detail.data?.knowledge_mode ?? selected?.knowledge_mode ?? "DISABLED"} selectedSourceCount={detail.data?.knowledge_mode === "SELECTED" ? detail.data.selected_source_ids.length : 0} draft={draft} streaming={streaming} onDraftChange={setDraft} onSend={() => void send()} />
       </section>
-      {citationSelection && <Suspense fallback={<aside className="citation-panel"><div className="citation-state">正在打开引用预览…</div></aside>}><CitationPreviewPanel selection={citationSelection} onClose={() => setCitationSelection(null)} /></Suspense>}
+      <KnowledgeContextSidebar account={account} conversation={detail.data ?? selected} citationSelection={citationSelection} onCitationClose={() => setCitationSelection(null)} onConversationUpdated={async () => { await detail.refetch(); }} />
       </section>
       )}
     </main>

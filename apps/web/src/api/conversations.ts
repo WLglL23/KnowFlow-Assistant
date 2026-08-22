@@ -90,6 +90,14 @@ export const createConversation = () => request<Conversation>("/api/conversation
 export const getConversation = (id: string) => request<ConversationDetail>(`/api/conversations/${id}`);
 export const renameConversation = (id: string, title: string) =>
   request<Conversation>(`/api/conversations/${id}`, { method: "PATCH", body: JSON.stringify({ title }) });
+export const updateKnowledgeScope = (
+  id: string,
+  knowledgeMode: Conversation["knowledge_mode"],
+  selectedSourceIds: string[],
+) => request<Conversation>(`/api/conversations/${id}`, {
+  method: "PATCH",
+  body: JSON.stringify({ knowledge_mode: knowledgeMode, selected_source_ids: selectedSourceIds }),
+});
 export const listAttachments = (conversationId: string) =>
   request<AttachmentList>(`/api/conversations/${conversationId}/attachments`);
 export const uploadAttachment = (conversationId: string, file: File) => {

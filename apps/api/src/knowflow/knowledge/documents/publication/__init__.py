@@ -111,6 +111,22 @@ class PublicationDocuments:
             items=[KnowledgeSourceResponse.from_model(item) for item in items]
         )
 
+    async def list_available_sources(self) -> KnowledgeSourceListResponse:
+        async with self._sessions() as session:
+            items = (
+                await session.scalars(
+                    select(KnowledgeSubmission)
+                    .where(
+                        KnowledgeSubmission.status == KnowledgeSubmissionStatus.PUBLISHED,
+                        KnowledgeSubmission.enabled.is_(True),
+                    )
+                    .order_by(KnowledgeSubmission.created_at, KnowledgeSubmission.id)
+                )
+            ).all()
+        return KnowledgeSourceListResponse(
+            items=[KnowledgeSourceResponse.from_model(item) for item in items]
+        )
+
     async def read_source_document(self, source_id: str) -> tuple[bytes, str]:
         async with self._sessions() as session:
             source = await session.get(KnowledgeSubmission, source_id)

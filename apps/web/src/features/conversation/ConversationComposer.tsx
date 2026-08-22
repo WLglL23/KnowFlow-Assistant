@@ -41,6 +41,8 @@ function attachmentState(attachment: Attachment): { label: string; tone: string 
 type ConversationComposerProps = {
   accountId: string;
   conversationId: string | null;
+  knowledgeMode: "DISABLED" | "ALL" | "SELECTED";
+  selectedSourceCount: number;
   draft: string;
   streaming: boolean;
   onDraftChange: (value: string) => void;
@@ -50,6 +52,8 @@ type ConversationComposerProps = {
 export function ConversationComposer({
   accountId,
   conversationId,
+  knowledgeMode,
+  selectedSourceCount,
   draft,
   streaming,
   onDraftChange,
@@ -67,6 +71,7 @@ export function ConversationComposer({
     refetchInterval: (query) => query.state.data?.items.some((item) => item.status === "QUEUED" || item.status === "PROCESSING") ? 1500 : false,
   });
   const occupied = attachments.data?.items.filter((item) => item.status !== "FAILED").length ?? 0;
+  const sourceCount = knowledgeMode === "SELECTED" ? occupied + selectedSourceCount : occupied;
   const upload = useMutation({
     mutationFn: (file: File) => uploadAttachment(conversationId as string, file),
     onSuccess: async (response) => {
@@ -92,7 +97,7 @@ export function ConversationComposer({
   return (
     <div className="composer-shell">
       <div className="attachment-strip" aria-label="当前会话附件">
-        <span className="attachment-quota">附件 {occupied}/5</span>
+        <span className="attachment-quota">来源 {sourceCount}/5</span>
         {attachments.data?.items.map((attachment) => {
           const state = attachmentState(attachment);
           return (
@@ -116,9 +121,9 @@ export function ConversationComposer({
           className="composer-icon-button attachment-trigger"
           type="button"
           onClick={() => fileInput.current?.click()}
-          disabled={!conversationId || occupied >= 5 || upload.isPending}
-          aria-label={occupied >= 5 ? "附件名额已满（5/5）" : `上传 PDF（${occupied}/5）`}
-          title={occupied >= 5 ? "附件名额已满（5/5）" : `上传 PDF（${occupied}/5）`}
+          disabled={!conversationId || sourceCount >= 5 || upload.isPending}
+          aria-label={sourceCount >= 5 ? "来源名额已满（5/5）" : `上传 PDF（${sourceCount}/5）`}
+          title={sourceCount >= 5 ? "来源名额已满（5/5）" : `上传 PDF（${sourceCount}/5）`}
         >
           {upload.isPending ? <LoaderCircle className="spin" size={18} /> : <Plus size={19} />}
         </button>

@@ -38,6 +38,7 @@ from knowflow.knowledge.documents.object_store import PrivateObjectStore
 from knowflow.knowledge.documents.pdf import PdfDocuments
 from knowflow.knowledge.documents.publication import PublicationDocuments
 from knowflow.knowledge.documents.publication.api import router as publication_router
+from knowflow.knowledge.documents.publication.user_api import router as user_publication_router
 from knowflow.knowledge.documents.submissions import SubmissionDocuments
 from knowflow.knowledge.documents.submissions.admin_api import router as admin_submissions_router
 from knowflow.knowledge.documents.submissions.api import router as submissions_router
@@ -165,4 +166,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(submissions_router)
     app.include_router(admin_submissions_router)
     app.include_router(publication_router)
+    app.include_router(user_publication_router)
     return app
