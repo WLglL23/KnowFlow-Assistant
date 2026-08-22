@@ -59,6 +59,12 @@ class TraceTermination(BaseModel):
 class TraceRetrieval(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    retrieval_round_count: int
+    actual_query_count: int
+    planned_subquestion_count: int
+    sufficient_subquestion_count: int
+    missing_fact_count: int
+    final_evidence_source_types: list[str]
     final_evidence_chunk_count: int
     final_evidence_token_count: int
 

@@ -65,11 +65,19 @@ class ChatClient(Protocol):
     ) -> ChatTextResult: ...
 
     async def complete_json(
-        self, messages: Sequence[ChatMessage], *, timeout_seconds: float
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        timeout_seconds: float,
+        reasoning_budget_tokens: int | None = None,
     ) -> ChatJsonResult: ...
 
     def stream_text(
-        self, messages: Sequence[ChatMessage], *, timeout_seconds: float
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        timeout_seconds: float,
+        reasoning_budget_tokens: int | None = None,
     ) -> AsyncIterator[ChatStreamEvent]: ...
 
 
@@ -107,9 +115,17 @@ class OpenAICompatibleChatAdapter:
         return ChatTextResult(content=content, usage=self._usage(payload))
 
     async def complete_json(
-        self, messages: Sequence[ChatMessage], *, timeout_seconds: float
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        timeout_seconds: float,
+        reasoning_budget_tokens: int | None = None,
     ) -> ChatJsonResult:
-        result = await self._complete_text_json_mode(messages, timeout_seconds=timeout_seconds)
+        result = await self._complete_text_json_mode(
+            messages,
+            timeout_seconds=timeout_seconds,
+            reasoning_budget_tokens=reasoning_budget_tokens,
+        )
         try:
             parsed: object = json.loads(result.content)
         except json.JSONDecodeError as exc:
@@ -119,13 +135,18 @@ class OpenAICompatibleChatAdapter:
         return ChatJsonResult(payload=cast(dict[str, Any], parsed), usage=result.usage)
 
     async def _complete_text_json_mode(
-        self, messages: Sequence[ChatMessage], *, timeout_seconds: float
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        timeout_seconds: float,
+        reasoning_budget_tokens: int | None,
     ) -> ChatTextResult:
         payload = await self._request(
             messages,
             stream=False,
             json_mode=True,
             timeout_seconds=timeout_seconds,
+            reasoning_budget_tokens=reasoning_budget_tokens,
         )
         try:
             content = payload["choices"][0]["message"]["content"]
@@ -138,12 +159,21 @@ class OpenAICompatibleChatAdapter:
         return ChatTextResult(content=content, usage=self._usage(payload))
 
     async def stream_text(
-        self, messages: Sequence[ChatMessage], *, timeout_seconds: float
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        timeout_seconds: float,
+        reasoning_budget_tokens: int | None = None,
     ) -> AsyncIterator[ChatStreamEvent]:
         self.ensure_configured()
         assert self._base_url is not None
         assert self._api_key is not None
-        body = self._body(messages, stream=True, json_mode=False)
+        body = self._body(
+            messages,
+            stream=True,
+            json_mode=False,
+            reasoning_budget_tokens=reasoning_budget_tokens,
+        )
         received_content = False
         try:
             async with httpx.AsyncClient(timeout=max(timeout_seconds, 0.001)) as client:
@@ -208,11 +238,17 @@ class OpenAICompatibleChatAdapter:
         stream: bool,
         json_mode: bool,
         timeout_seconds: float,
+        reasoning_budget_tokens: int | None = None,
     ) -> dict[str, Any]:
         self.ensure_configured()
         assert self._base_url is not None
         assert self._api_key is not None
-        body = self._body(messages, stream=stream, json_mode=json_mode)
+        body = self._body(
+            messages,
+            stream=stream,
+            json_mode=json_mode,
+            reasoning_budget_tokens=reasoning_budget_tokens,
+        )
         try:
             async with httpx.AsyncClient(timeout=max(timeout_seconds, 0.001)) as client:
                 response = await client.post(
@@ -268,6 +304,7 @@ class OpenAICompatibleChatAdapter:
         *,
         stream: bool,
         json_mode: bool,
+        reasoning_budget_tokens: int | None = None,
     ) -> dict[str, Any]:
         assert self._model is not None
         body: dict[str, Any] = {
@@ -276,8 +313,12 @@ class OpenAICompatibleChatAdapter:
                 {"role": message.role, "content": message.content} for message in messages
             ],
             "stream": stream,
-            "enable_thinking": False,
+            "enable_thinking": reasoning_budget_tokens is not None,
         }
+        if reasoning_budget_tokens is not None:
+            if reasoning_budget_tokens <= 0:
+                raise ChatConfigurationError("Reasoning budget must be positive")
+            body["thinking_budget"] = reasoning_budget_tokens
         if json_mode:
             body["response_format"] = {"type": "json_object"}
         return body

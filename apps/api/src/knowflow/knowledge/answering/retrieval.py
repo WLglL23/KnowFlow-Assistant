@@ -109,7 +109,15 @@ class AttachmentRetrieval:
             raise RetrievalError("retrieval models are not configured")
 
     async def embed(self, query: str, *, timeout_seconds: float) -> list[float]:
+        vectors = await self.embed_many([query], timeout_seconds=timeout_seconds)
+        return vectors[0]
+
+    async def embed_many(
+        self, queries: list[str], *, timeout_seconds: float
+    ) -> list[list[float]]:
         self.ensure_configured()
+        if not queries:
+            return []
         assert self._embedding_base_url and self._embedding_api_key
         try:
             async with httpx.AsyncClient(timeout=max(timeout_seconds, 0.001)) as client:
@@ -118,13 +126,16 @@ class AttachmentRetrieval:
                     headers={
                         "Authorization": f"Bearer {self._embedding_api_key.get_secret_value()}"
                     },
-                    json={"model": self._embedding_model, "input": [query]},
+                    json={"model": self._embedding_model, "input": queries},
                 )
                 response.raise_for_status()
                 payload = _EmbeddingResponse.model_validate(response.json())
-            if not payload.data or len(payload.data[0].embedding) != self._embedding_dimensions:
+            vectors = [item.embedding for item in payload.data]
+            if len(vectors) != len(queries) or any(
+                len(vector) != self._embedding_dimensions for vector in vectors
+            ):
                 raise RetrievalError("embedding dimension mismatch")
-            return payload.data[0].embedding
+            return vectors
         except RetrievalError:
             raise
         except httpx.HTTPStatusError as exc:
@@ -147,31 +158,53 @@ class AttachmentRetrieval:
         if not source_filenames:
             return []
         source_filter = {"terms": {"source_id.keyword": list(source_filenames)}}
-        bm25 = {
-            "size": 40,
-            "query": {"bool": {"must": [{"match": {"text": query}}], "filter": [source_filter]}},
-        }
-        dense = {
-            "size": 40,
-            "query": {
-                "script_score": {
-                    "query": {"bool": {"filter": [source_filter]}},
-                    "script": {
-                        "source": "cosineSimilarity(params.query_vector, 'vector') + 1.0",
-                        "params": {"query_vector": vector},
-                    },
-                }
-            },
-        }
         try:
+            group_rankings: list[list[_SearchHit]] = []
             async with httpx.AsyncClient(timeout=max(timeout_seconds, 0.001)) as client:
-                first = await client.post(f"{self._search_url}/{self._index}/_search", json=bm25)
-                first.raise_for_status()
-                second = await client.post(f"{self._search_url}/{self._index}/_search", json=dense)
-                second.raise_for_status()
-            first_hits = _SearchResponse.model_validate(first.json()).hits.hits
-            second_hits = _SearchResponse.model_validate(second.json()).hits.hits
-            ranked = self._rrf(first_hits, second_hits)
+                for source_type in ("ATTACHMENT", "KNOWLEDGE"):
+                    filters = [
+                        source_filter,
+                        {"term": {"source_type.keyword": source_type}},
+                    ]
+                    bm25 = {
+                        "size": 40,
+                        "query": {
+                            "bool": {
+                                "must": [{"match": {"text": query}}],
+                                "filter": filters,
+                            }
+                        },
+                    }
+                    dense = {
+                        "size": 40,
+                        "query": {
+                            "script_score": {
+                                "query": {"bool": {"filter": filters}},
+                                "script": {
+                                    "source": (
+                                        "cosineSimilarity(params.query_vector, 'vector') + 1.0"
+                                    ),
+                                    "params": {"query_vector": vector},
+                                },
+                            }
+                        },
+                    }
+                    bm25_response = await client.post(
+                        f"{self._search_url}/{self._index}/_search", json=bm25
+                    )
+                    bm25_response.raise_for_status()
+                    dense_response = await client.post(
+                        f"{self._search_url}/{self._index}/_search", json=dense
+                    )
+                    dense_response.raise_for_status()
+                    bm25_hits = _SearchResponse.model_validate(
+                        bm25_response.json()
+                    ).hits.hits
+                    dense_hits = _SearchResponse.model_validate(
+                        dense_response.json()
+                    ).hits.hits
+                    group_rankings.append(self._rrf(bm25_hits, dense_hits))
+            ranked = self._rrf(*group_rankings)
             return [
                 self._to_evidence(hit, source_filenames)
                 for hit in ranked
@@ -236,6 +269,10 @@ class AttachmentRetrieval:
             if len(selected) == max_chunks:
                 break
         return selected, token_count
+
+    @staticmethod
+    def token_count(evidence: Evidence) -> int:
+        return EvidenceTokenizerV1.count(evidence.text)
 
     @staticmethod
     def _rrf(*rankings: list[_SearchHit]) -> list[_SearchHit]:

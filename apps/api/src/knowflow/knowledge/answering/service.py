@@ -35,6 +35,11 @@ from knowflow.knowledge.answering.contracts import (
     RunFailedEvent,
     StageEvent,
 )
+from knowflow.knowledge.answering.grounding import (
+    GROUNDING_CONTROL_PREFIX,
+    GROUNDING_CONTROL_SUFFIX,
+    GroundedAnswerParser,
+)
 from knowflow.knowledge.answering.models import (
     AgentRun,
     AgentRunStage,
@@ -61,28 +66,54 @@ from knowflow.knowledge.answering.trace import (
 )
 from knowflow.knowledge.conversations.models import Conversation
 from knowflow.knowledge.conversations.service import allowed_source_scope
-from knowflow.knowledge.documents.models import ConversationAttachment
+from knowflow.knowledge.documents.models import ConversationAttachment, KnowledgeSubmission
 
 
-class RouteDecision(BaseModel):
+class UnderstandingResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    standalone_question: str
+
+
+@dataclass(frozen=True, slots=True)
+class RouteDecision:
     route: AnswerRoute
     standalone_question: str
-    reason_code: str
+
+
+class PlannedSubquestion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    question: str
 
 
 class RetrievalPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    queries: list[str]
+    subquestions: list[PlannedSubquestion]
 
 
-class VerificationDecision(BaseModel):
+class SubquestionVerification(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    coverage: Literal["FULL", "NONE"]
+    subquestion_id: str
+    sufficiency: Literal["SUFFICIENT", "INSUFFICIENT"]
+    labels: list[str]
     missing_facts: list[str]
+    supplemental_query: str | None
+
+
+class VerificationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    results: list[SubquestionVerification]
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalEvidence:
+    by_label: dict[str, Evidence]
+    labels_by_subquestion: dict[str, tuple[str, ...]]
 
 
 class RunExecutionError(RuntimeError):
@@ -106,6 +137,11 @@ class RunExecutionContext:
     evidence: list[Evidence] = field(default_factory=lambda: [])
     evidence_token_count: int = 0
     citations: list[dict[str, object]] = field(default_factory=lambda: [])
+    retrieval_round_count: int = 0
+    actual_query_count: int = 0
+    planned_subquestion_count: int = 0
+    sufficient_subquestion_count: int = 0
+    missing_fact_count: int = 0
 
     @property
     def answer(self) -> str:
@@ -367,10 +403,13 @@ class AnsweringService:
         prepared = await self._prepare(conversation_id, user_message_id)
         if prepared.summary_candidates:
             prepared = await self._summarize(conversation_id, prepared, context)
+        source_scope, source_filenames = await self._frozen_sources(run_id)
+        route = self._deterministic_route(source_scope, content)
         try:
-            decision = await self._route(prepared, content, context)
+            understanding = await self._understand(prepared, content, context)
         except (ChatError, ValidationError) as exc:
             raise RunExecutionError("MODEL_FAILED") from exc
+        decision = RouteDecision(route, understanding.standalone_question)
         context.route = decision.route
         await self._complete_understand_stage(context.current_stage_id, run_id, decision.route)
         context.current_stage_id = None
@@ -378,11 +417,11 @@ class AnsweringService:
         yield StageEvent("stage.completed", request_id, run_id, StageName.UNDERSTAND.value)
 
         if decision.route is AnswerRoute.RETRIEVAL:
-            source_filenames = await self._source_filenames(run_id)
             if source_filenames:
                 await self._enter_stage(run_id, StageName.PLAN, context)
                 yield StageEvent("stage.started", request_id, run_id, StageName.PLAN.value)
                 plan = await self._plan(prepared, decision, context)
+                context.planned_subquestion_count = len(plan.subquestions)
                 await self._complete_stage(context.current_stage_id)
                 context.current_stage_id = None
                 context.current_stage = None
@@ -390,11 +429,10 @@ class AnsweringService:
 
                 await self._enter_stage(run_id, StageName.RETRIEVE_1, context)
                 yield StageEvent("stage.started", request_id, run_id, StageName.RETRIEVE_1.value)
-                context.evidence = await self._retrieve(plan, source_filenames, context)
-                context.evidence, context.evidence_token_count = self._retrieval.select(
-                    context.evidence,
-                    max_chunks=self._policy.limits.max_evidence_chunks,
-                    max_tokens=self._policy.limits.max_evidence_tokens,
+                retrieval = await self._retrieve(
+                    [(item.id, item.question) for item in plan.subquestions],
+                    source_filenames,
+                    context,
                 )
                 await self._complete_stage(context.current_stage_id)
                 context.current_stage_id = None
@@ -403,28 +441,109 @@ class AnsweringService:
 
                 await self._enter_stage(run_id, StageName.VERIFY, context)
                 yield StageEvent("stage.started", request_id, run_id, StageName.VERIFY.value)
-                verification = await self._verify(plan, context.evidence, context)
-                context.coverage = verification.coverage
+                verification = await self._verify(plan, retrieval, context)
                 await self._complete_stage(context.current_stage_id)
                 context.current_stage_id = None
                 context.current_stage = None
                 yield StageEvent("stage.completed", request_id, run_id, StageName.VERIFY.value)
 
+                gap_queries = self._gap_queries(verification)
+                if gap_queries:
+                    first_round_evidence = retrieval
+                    await self._enter_stage(run_id, StageName.RETRIEVE_2, context)
+                    yield StageEvent(
+                        "stage.started", request_id, run_id, StageName.RETRIEVE_2.value
+                    )
+                    retrieval = await self._retrieve(
+                        gap_queries,
+                        source_filenames,
+                        context,
+                        existing=retrieval,
+                    )
+                    await self._complete_stage(context.current_stage_id)
+                    context.current_stage_id = None
+                    context.current_stage = None
+                    yield StageEvent(
+                        "stage.completed", request_id, run_id, StageName.RETRIEVE_2.value
+                    )
+
+                    changed_ids = self._subquestions_with_new_evidence(
+                        gap_queries, first_round_evidence, retrieval
+                    )
+                    if changed_ids:
+                        gap_plan = RetrievalPlan(
+                            subquestions=[
+                                item
+                                for item in plan.subquestions
+                                if item.id in changed_ids
+                            ]
+                        )
+                        await self._enter_stage(run_id, StageName.VERIFY, context)
+                        yield StageEvent(
+                            "stage.started", request_id, run_id, StageName.VERIFY.value
+                        )
+                        gap_verification = await self._verify(
+                            gap_plan,
+                            retrieval,
+                            context,
+                            required_missing_facts={
+                                item.subquestion_id: item.missing_facts
+                                for item in verification
+                                if item.subquestion_id in changed_ids
+                            },
+                        )
+                        verification = self._merge_verification(
+                            plan, verification, gap_verification
+                        )
+                        await self._complete_stage(context.current_stage_id)
+                        context.current_stage_id = None
+                        context.current_stage = None
+                        yield StageEvent(
+                            "stage.completed", request_id, run_id, StageName.VERIFY.value
+                        )
+
+                context.coverage = self._coverage(verification)
+                context.sufficient_subquestion_count = sum(
+                    item.sufficiency == "SUFFICIENT" for item in verification
+                )
+                context.missing_fact_count = sum(
+                    len(item.missing_facts) for item in verification
+                )
+                answer_evidence = self._verified_evidence(
+                    plan, verification, retrieval
+                )
+                context.evidence = []
+                context.evidence_token_count = 0
+                context.citations = []
+
                 await self._enter_stage(run_id, StageName.GENERATE, context)
                 yield StageEvent("stage.started", request_id, run_id, StageName.GENERATE.value)
                 try:
-                    if verification.coverage == "FULL":
-                        context.citations = self._citations(context.evidence)
+                    if context.coverage in {"FULL", "PARTIAL"}:
                         async for delta in self._generate_grounded(
-                            prepared, content, decision, context.evidence, context
+                            prepared,
+                            content,
+                            decision,
+                            self._answered_subquestions(plan, verification),
+                            answer_evidence,
+                            context,
                         ):
                             visible, exceeded = self._append_visible_delta(context, delta)
                             if visible:
                                 yield AnswerDeltaEvent("answer.delta", request_id, run_id, visible)
                             if exceeded:
                                 raise RunExecutionError("RUN_LIMIT_EXCEEDED")
+                        if context.coverage == "PARTIAL":
+                            notice = self._partial_notice(plan, verification)
+                            visible, exceeded = self._append_visible_delta(context, notice)
+                            if visible:
+                                yield AnswerDeltaEvent(
+                                    "answer.delta", request_id, run_id, visible
+                                )
+                            if exceeded:
+                                raise RunExecutionError("RUN_LIMIT_EXCEEDED")
                     else:
-                        refusal = "当前证据不足，无法可靠回答该问题。请补充包含相关事实的 PDF。"
+                        refusal = self._refusal(plan, verification)
                         visible, exceeded = self._append_visible_delta(context, refusal)
                         if visible:
                             yield AnswerDeltaEvent("answer.delta", request_id, run_id, visible)
@@ -488,141 +607,594 @@ class AnsweringService:
         context.terminal_committed = True
         yield RunCompletedEvent("run.completed", request_id, run_id, assistant_message_id)
 
-    async def _source_filenames(self, run_id: str) -> dict[str, str]:
+    async def _frozen_sources(
+        self, run_id: str
+    ) -> tuple[dict[str, object], dict[str, str]]:
         async with self._sessions() as session:
             run = await session.get(AgentRun, run_id)
             if run is None:
                 raise RuntimeError("Answering run is missing")
-            raw_ids = run.source_scope_json.get("attachment_ids")
-            if not isinstance(raw_ids, list):
-                raise RuntimeError("Answering run source scope is invalid")
-            id_values = cast(list[object], raw_ids)
-            if not all(isinstance(item, str) for item in id_values):
-                raise RuntimeError("Answering run source scope is invalid")
-            ids = cast(list[str], id_values)
-            if not ids:
-                return {}
-            items = list(
+            source_scope = run.source_scope_json
+            attachment_ids = self._scope_ids(source_scope, "attachment_ids")
+            knowledge_ids = self._scope_ids(
+                source_scope, "knowledge_source_ids"
+            )
+            attachments = list(
                 (
                     await session.scalars(
-                        select(ConversationAttachment).where(ConversationAttachment.id.in_(ids))
+                        select(ConversationAttachment).where(
+                            ConversationAttachment.id.in_(attachment_ids)
+                        )
                     )
                 ).all()
             )
-        return {item.id: item.filename for item in items if item.id in ids}
+            knowledge_sources = list(
+                (
+                    await session.scalars(
+                        select(KnowledgeSubmission).where(
+                            KnowledgeSubmission.id.in_(knowledge_ids)
+                        )
+                    )
+                ).all()
+            )
+        filenames = {
+            item.id: item.filename for item in attachments if item.id in attachment_ids
+        }
+        filenames.update(
+            {
+                item.id: item.filename
+                for item in knowledge_sources
+                if item.id in knowledge_ids
+            }
+        )
+        return source_scope, filenames
+
+    @staticmethod
+    def _scope_ids(scope: dict[str, object], name: str) -> list[str]:
+        raw_ids = scope.get(name)
+        if not isinstance(raw_ids, list):
+            raise RuntimeError("Answering run source scope is invalid")
+        id_values = cast(list[object], raw_ids)
+        if not all(isinstance(item, str) for item in id_values):
+            raise RuntimeError("Answering run source scope is invalid")
+        return cast(list[str], id_values)
 
     async def _plan(
         self, prepared: PreparedContext, decision: RouteDecision, context: RunExecutionContext
     ) -> RetrievalPlan:
         messages = [
             ChatMessage(
-                "system", "为独立 PDF 问题生成一个检索查询。只返回 JSON：{\"queries\":[\"...\"]}。"
+                "system",
+                "把独立问题拆成一到五个可分别用 PDF 证据核验的子问题。"
+                "id 必须在本次响应内唯一且后续保持不变，question 必须可独立检索。"
+                "只返回严格 JSON 对象："
+                '{"subquestions":[{"id":"sq_1","question":"..."}]}。'
+                "不得返回 query 列表、coverage、解释或额外字段。",
             ),
             *prepared.chat_messages(decision.standalone_question),
         ]
+        correction = ChatMessage(
+            "user",
+            "上一响应不符合 PLAN JSON contract。请重新返回唯一 subquestion id 和非空 "
+            "question；只返回 subquestions 对象。",
+        )
         while True:
             try:
                 result = await self._chat.complete_json(
-                    messages, timeout_seconds=self._chat_timeout(context)
+                    messages,
+                    timeout_seconds=self._chat_timeout(context),
                 )
                 context.record_usage("PLAN", result.usage)
                 plan = RetrievalPlan.model_validate(result.payload)
-                queries = [query.strip() for query in plan.queries if query.strip()]
-                if not queries:
-                    raise ValidationError.from_exception_data("RetrievalPlan", [])
-                return RetrievalPlan(queries=queries[:1])
-            except (ValidationError, ChatError) as exc:
-                retryable = isinstance(exc, ValidationError) or exc.retryable
+                normalized = [
+                    PlannedSubquestion(id=item.id.strip(), question=item.question.strip())
+                    for item in plan.subquestions
+                ]
+                if not normalized or any(
+                    not item.id or not item.question for item in normalized
+                ):
+                    raise ValueError("PLAN contains an empty subquestion")
+                ids = [item.id for item in normalized]
+                if len(ids) != len(set(ids)):
+                    raise ValueError("PLAN contains duplicate subquestion ids")
+                if len(normalized) > self._policy.limits.max_subquestions:
+                    raise RunExecutionError("RUN_LIMIT_EXCEEDED")
+                return RetrievalPlan(subquestions=normalized)
+            except RunExecutionError:
+                raise
+            except (ValidationError, ValueError, ChatError) as exc:
+                retryable = isinstance(exc, (ValidationError, ValueError)) or exc.retryable
                 if retryable and context.consume_retry():
+                    messages.append(correction)
                     continue
                 raise RunExecutionError("MODEL_FAILED") from exc
 
     async def _retrieve(
         self,
-        plan: RetrievalPlan,
+        queries: list[tuple[str, str]],
         source_filenames: dict[str, str],
         context: RunExecutionContext,
-    ) -> list[Evidence]:
-        query = plan.queries[0]
+        *,
+        existing: RetrievalEvidence | None = None,
+    ) -> RetrievalEvidence:
+        if not queries:
+            raise RuntimeError("Retrieval requires at least one query")
+        limits = self._policy.limits
+        if context.retrieval_round_count >= limits.max_retrieval_rounds:
+            raise RunExecutionError("RUN_LIMIT_EXCEEDED")
+        if context.actual_query_count + len(queries) > limits.max_actual_queries:
+            raise RunExecutionError("RUN_LIMIT_EXCEEDED")
+        context.retrieval_round_count += 1
+        context.actual_query_count += len(queries)
+
+        query_texts = [query for _subquestion_id, query in queries]
         while True:
             try:
-                vector = await self._retrieval.embed(
-                    query, timeout_seconds=self._chat_timeout(context)
+                vectors = await self._retrieval.embed_many(
+                    query_texts, timeout_seconds=self._chat_timeout(context)
                 )
                 break
             except RetrievalError as exc:
                 if not (exc.retryable and context.consume_retry()):
                     raise RunExecutionError("RETRIEVAL_FAILED") from exc
+
+        evidence_by_query: dict[str, list[Evidence]] = {}
         try:
-            evidence = await self._retrieval.hybrid(
-                query, vector, source_filenames, timeout_seconds=self._chat_timeout(context)
-            )
+            for (subquestion_id, query), vector in zip(queries, vectors, strict=True):
+                evidence_by_query[subquestion_id] = await self._retrieval.hybrid(
+                    query,
+                    vector,
+                    source_filenames,
+                    timeout_seconds=self._chat_timeout(context),
+                )
         except RetrievalError as exc:
             raise RunExecutionError("RETRIEVAL_FAILED") from exc
+
+        round_evidence: list[Evidence] = []
+        seen_chunks: set[tuple[str, str]] = set()
+        for subquestion_id, _query in queries:
+            for item in evidence_by_query[subquestion_id]:
+                key = (item.source_id, item.chunk_id)
+                if key not in seen_chunks:
+                    seen_chunks.add(key)
+                    round_evidence.append(item)
         while True:
             try:
-                return await self._retrieval.rerank(
-                    query, evidence, timeout_seconds=self._chat_timeout(context)
+                reranked = await self._retrieval.rerank(
+                    "；".join(query_texts),
+                    round_evidence,
+                    timeout_seconds=self._chat_timeout(context),
                 )
+                break
             except RetrievalError as exc:
                 if not (exc.retryable and context.consume_retry()):
                     raise RunExecutionError("RETRIEVAL_FAILED") from exc
 
-    async def _verify(
-        self, plan: RetrievalPlan, evidence: list[Evidence], context: RunExecutionContext
-    ) -> VerificationDecision:
-        evidence_text = "\n\n".join(
-            f"来源：{item.filename} 页码：{','.join(map(str, item.pages))}\n{item.text}"
-            for item in evidence
+        by_label = {} if existing is None else dict(existing.by_label)
+        labels_by_subquestion = (
+            {} if existing is None else dict(existing.labels_by_subquestion)
         )
+        label_by_chunk = {
+            (item.source_id, item.chunk_id): label for label, item in by_label.items()
+        }
+        rank = {
+            (item.source_id, item.chunk_id): index for index, item in enumerate(reranked)
+        }
+        next_label = len(by_label) + 1
+        for subquestion_id, _query in queries:
+            labels = list(labels_by_subquestion.get(subquestion_id, ()))
+            candidates = sorted(
+                evidence_by_query[subquestion_id],
+                key=lambda item: rank.get((item.source_id, item.chunk_id), len(rank)),
+            )
+            for item in candidates:
+                key = (item.source_id, item.chunk_id)
+                label = label_by_chunk.get(key)
+                if label is None:
+                    label = f"E{next_label}"
+                    next_label += 1
+                    label_by_chunk[key] = label
+                    by_label[label] = item
+                if label not in labels:
+                    labels.append(label)
+            labels_by_subquestion[subquestion_id] = tuple(labels)
+
+        ordered_labels = self._coverage_first_labels(labels_by_subquestion)
+        selected, _token_count = self._retrieval.select(
+            [by_label[label] for label in ordered_labels],
+            max_chunks=limits.max_evidence_chunks,
+            max_tokens=limits.max_evidence_tokens,
+        )
+        selected_keys = {(item.source_id, item.chunk_id) for item in selected}
+        selected_labels = {
+            label
+            for label, item in by_label.items()
+            if (item.source_id, item.chunk_id) in selected_keys
+        }
+        return RetrievalEvidence(
+            by_label={
+                label: by_label[label]
+                for label in ordered_labels
+                if label in selected_labels
+            },
+            labels_by_subquestion={
+                subquestion_id: tuple(
+                    label for label in labels if label in selected_labels
+                )
+                for subquestion_id, labels in labels_by_subquestion.items()
+            },
+        )
+
+    @staticmethod
+    def _coverage_first_labels(
+        labels_by_subquestion: dict[str, tuple[str, ...]],
+    ) -> list[str]:
+        ordered: list[str] = []
+        depth = 0
+        while any(depth < len(labels) for labels in labels_by_subquestion.values()):
+            for labels in labels_by_subquestion.values():
+                if depth < len(labels) and labels[depth] not in ordered:
+                    ordered.append(labels[depth])
+            depth += 1
+        return ordered
+
+    async def _verify(
+        self,
+        plan: RetrievalPlan,
+        evidence: RetrievalEvidence,
+        context: RunExecutionContext,
+        *,
+        required_missing_facts: dict[str, list[str]] | None = None,
+    ) -> list[SubquestionVerification]:
+        normalized = await self._verify_once(
+            plan,
+            evidence,
+            context,
+            required_missing_facts=required_missing_facts,
+        )
+        if required_missing_facts is not None:
+            return normalized
+
+        # A batch response can omit an otherwise available candidate for one
+        # subquestion. Recheck only that ambiguous shape independently; a
+        # negative independent result leaves the conservative batch decision in place.
+        by_id = {item.subquestion_id: item for item in normalized}
+        review_ids = [
+            item.subquestion_id
+            for item in normalized
+            if item.sufficiency == "INSUFFICIENT"
+            and not item.labels
+            and evidence.labels_by_subquestion.get(item.subquestion_id)
+        ]
+        if (
+            len(normalized) < 2
+            or len(review_ids) != 1
+            or sum(item.sufficiency == "SUFFICIENT" for item in normalized)
+            != len(normalized) - 1
+        ):
+            return normalized
+        plan_by_id = {item.id: item for item in plan.subquestions}
+        for subquestion_id in review_ids:
+            reviewed = await self._verify_once(
+                RetrievalPlan(subquestions=[plan_by_id[subquestion_id]]),
+                evidence,
+                context,
+                required_missing_facts={
+                    subquestion_id: by_id[subquestion_id].missing_facts
+                },
+                independent=True,
+            )
+            if reviewed[0].sufficiency == "SUFFICIENT":
+                by_id[subquestion_id] = reviewed[0]
+        return [by_id[item.id] for item in plan.subquestions]
+
+    async def _verify_once(
+        self,
+        plan: RetrievalPlan,
+        evidence: RetrievalEvidence,
+        context: RunExecutionContext,
+        *,
+        required_missing_facts: dict[str, list[str]] | None = None,
+        independent: bool = False,
+    ) -> list[SubquestionVerification]:
+        evidence_sections: list[str] = []
+        for subquestion in plan.subquestions:
+            labels = evidence.labels_by_subquestion.get(subquestion.id, ())
+            rendered = "\n".join(
+                f"[{label}] 来源：{evidence.by_label[label].filename} "
+                f"页码：{','.join(map(str, evidence.by_label[label].pages))}\n"
+                f"{evidence.by_label[label].text}"
+                for label in labels
+            )
+            evidence_sections.append(
+                f"子问题 {subquestion.id}：{subquestion.question}\n"
+                + (
+                    "本轮必须补足的缺失事实："
+                    + "；".join(required_missing_facts[subquestion.id])
+                    + "\n"
+                    if required_missing_facts
+                    and subquestion.id in required_missing_facts
+                    else ""
+                )
+                + f"候选证据：\n{rendered or '无'}"
+            )
         messages = [
             ChatMessage(
                 "system",
-                "核验证据是否足以回答问题。只返回 JSON："
-                "{\"coverage\":\"FULL|NONE\",\"missing_facts\":[\"...\"]}。",
+                "逐题核验候选 PDF 证据。每个 PLAN 子问题必须恰好返回一个结果，"
+                "subquestion_id 必须原样复用。sufficiency 只能是 SUFFICIENT 或 "
+                "INSUFFICIENT；labels 只能引用该题列出的证据标签；SUFFICIENT 必须"
+                "至少有一个 label 且 missing_facts 为空；INSUFFICIENT 必须明确列出"
+                "missing_facts。每题 supplemental_query 只能是一个非空字符串或 null。"
+                "充分性表示证据直接支持该子问题要求的全部事实和全部限定条件；只有主题、"
+                "关键词或文档相关不构成充分。不得用模型通用知识、推断或常识补齐证据。"
+                "多条件问题缺少任一条件都必须返回 INSUFFICIENT。第二轮只有新增证据直接"
+                "补足列出的全部缺失事实时才可改为 SUFFICIENT。"
+                + (
+                    "这是对批量核验的单题独立复核；只判断当前子问题，不要因其他子问题的"
+                    "结果改变当前判断。"
+                    if independent
+                    else ""
+                )
+                + "只返回严格 JSON："
+                '{"results":[{"subquestion_id":"sq_1",'
+                '"sufficiency":"SUFFICIENT|INSUFFICIENT","labels":["E1"],'
+                '"missing_facts":[],"supplemental_query":null}]}。'
+                "不得返回整体 coverage、解释或额外字段。",
             ),
-            ChatMessage("user", f"问题：{plan.queries[0]}\n证据：\n{evidence_text}"),
+            ChatMessage("user", "\n\n".join(evidence_sections)),
         ]
+        correction = ChatMessage(
+            "user",
+            "上一响应不符合 VERIFY JSON contract。请逐题返回且只返回 results；"
+            "检查 subquestion_id、sufficiency、labels、missing_facts 和单个 "
+            "supplemental_query。",
+        )
         while True:
             try:
                 result = await self._chat.complete_json(
-                    messages, timeout_seconds=self._chat_timeout(context)
+                    messages,
+                    timeout_seconds=self._chat_timeout(context),
+                    reasoning_budget_tokens=(
+                        self._policy.limits.max_verify_thinking_tokens
+                    ),
                 )
                 context.record_usage("VERIFY", result.usage)
-                return VerificationDecision.model_validate(result.payload)
-            except (ValidationError, ChatError) as exc:
-                retryable = isinstance(exc, ValidationError) or exc.retryable
+                response = VerificationResponse.model_validate(result.payload)
+                return self._validated_verification(plan, evidence, response)
+            except (ValidationError, ValueError, ChatError) as exc:
+                retryable = isinstance(exc, (ValidationError, ValueError)) or exc.retryable
                 if retryable and context.consume_retry():
+                    messages.append(correction)
                     continue
                 raise RunExecutionError("MODEL_FAILED") from exc
+
+    @staticmethod
+    def _validated_verification(
+        plan: RetrievalPlan,
+        evidence: RetrievalEvidence,
+        response: VerificationResponse,
+    ) -> list[SubquestionVerification]:
+        expected_ids = [item.id for item in plan.subquestions]
+        actual_ids = [item.subquestion_id.strip() for item in response.results]
+        if len(actual_ids) != len(set(actual_ids)) or set(actual_ids) != set(expected_ids):
+            raise ValueError("VERIFY results do not match PLAN subquestions")
+        result_by_id = {
+            item.subquestion_id.strip(): item for item in response.results
+        }
+        normalized: list[SubquestionVerification] = []
+        for subquestion_id in expected_ids:
+            item = result_by_id[subquestion_id]
+            labels = list(dict.fromkeys(label.strip() for label in item.labels if label.strip()))
+            allowed_labels = set(evidence.labels_by_subquestion.get(subquestion_id, ()))
+            if not set(labels) <= allowed_labels:
+                raise ValueError("VERIFY referenced evidence outside its subquestion")
+            missing_facts = list(
+                dict.fromkeys(fact.strip() for fact in item.missing_facts if fact.strip())
+            )
+            supplemental_query = (
+                item.supplemental_query.strip()
+                if item.supplemental_query and item.supplemental_query.strip()
+                else None
+            )
+            if item.sufficiency == "SUFFICIENT":
+                if not labels or missing_facts or supplemental_query is not None:
+                    raise ValueError("SUFFICIENT verification is inconsistent")
+            elif not missing_facts:
+                raise ValueError("INSUFFICIENT verification requires missing facts")
+            normalized.append(
+                SubquestionVerification(
+                    subquestion_id=subquestion_id,
+                    sufficiency=item.sufficiency,
+                    labels=labels,
+                    missing_facts=missing_facts,
+                    supplemental_query=supplemental_query,
+                )
+            )
+        return normalized
+
+    @staticmethod
+    def _gap_queries(
+        verification: list[SubquestionVerification],
+    ) -> list[tuple[str, str]]:
+        return [
+            (item.subquestion_id, item.supplemental_query)
+            for item in verification
+            if item.sufficiency == "INSUFFICIENT"
+            and item.supplemental_query is not None
+        ]
+
+    @classmethod
+    def _subquestions_with_new_evidence(
+        cls,
+        gap_queries: list[tuple[str, str]],
+        before: RetrievalEvidence,
+        after: RetrievalEvidence,
+    ) -> set[str]:
+        return {
+            subquestion_id
+            for subquestion_id, _query in gap_queries
+            if cls._evidence_identities(after, subquestion_id)
+            - cls._evidence_identities(before, subquestion_id)
+        }
+
+    @staticmethod
+    def _evidence_identities(
+        evidence: RetrievalEvidence, subquestion_id: str
+    ) -> set[tuple[str, str]]:
+        return {
+            (item.source_id, item.chunk_id)
+            for label in evidence.labels_by_subquestion.get(subquestion_id, ())
+            if (item := evidence.by_label.get(label)) is not None
+        }
+
+    @staticmethod
+    def _merge_verification(
+        plan: RetrievalPlan,
+        first_round: list[SubquestionVerification],
+        gap_updates: list[SubquestionVerification],
+    ) -> list[SubquestionVerification]:
+        by_id = {item.subquestion_id: item for item in first_round}
+        by_id.update({item.subquestion_id: item for item in gap_updates})
+        return [by_id[item.id] for item in plan.subquestions]
+
+    @staticmethod
+    def _coverage(verification: list[SubquestionVerification]) -> str:
+        sufficient = sum(item.sufficiency == "SUFFICIENT" for item in verification)
+        if sufficient == len(verification):
+            return "FULL"
+        if sufficient == 0:
+            return "NONE"
+        return "PARTIAL"
+
+    @staticmethod
+    def _verified_evidence(
+        plan: RetrievalPlan,
+        verification: list[SubquestionVerification],
+        evidence: RetrievalEvidence,
+    ) -> RetrievalEvidence:
+        result_by_id = {item.subquestion_id: item for item in verification}
+        labels_by_subquestion: dict[str, tuple[str, ...]] = {}
+        by_label: dict[str, Evidence] = {}
+        for subquestion in plan.subquestions:
+            result = result_by_id[subquestion.id]
+            if result.sufficiency != "SUFFICIENT":
+                continue
+            labels_by_subquestion[subquestion.id] = tuple(result.labels)
+            for label in result.labels:
+                by_label[label] = evidence.by_label[label]
+        return RetrievalEvidence(
+            by_label=by_label,
+            labels_by_subquestion=labels_by_subquestion,
+        )
+
+    @staticmethod
+    def _answered_subquestions(
+        plan: RetrievalPlan, verification: list[SubquestionVerification]
+    ) -> list[PlannedSubquestion]:
+        sufficient_ids = {
+            item.subquestion_id
+            for item in verification
+            if item.sufficiency == "SUFFICIENT"
+        }
+        return [item for item in plan.subquestions if item.id in sufficient_ids]
+
+    @staticmethod
+    def _partial_notice(
+        plan: RetrievalPlan, verification: list[SubquestionVerification]
+    ) -> str:
+        questions = {item.id: item.question for item in plan.subquestions}
+        gaps = [
+            f"- {questions[item.subquestion_id]}：{'；'.join(item.missing_facts)}"
+            for item in verification
+            if item.sufficiency == "INSUFFICIENT"
+        ]
+        return "\n\n以下问题因证据不足未回答：\n" + "\n".join(gaps)
+
+    @staticmethod
+    def _refusal(
+        plan: RetrievalPlan, verification: list[SubquestionVerification]
+    ) -> str:
+        questions = {item.id: item.question for item in plan.subquestions}
+        gaps = [
+            f"{questions[item.subquestion_id]}：{'；'.join(item.missing_facts)}"
+            for item in verification
+        ]
+        return "当前证据不足，无法可靠回答。缺少：" + "；".join(gaps) + "。"
 
     async def _generate_grounded(
         self,
         prepared: PreparedContext,
         content: str,
         decision: RouteDecision,
-        evidence: list[Evidence],
+        subquestions: list[PlannedSubquestion],
+        evidence: RetrievalEvidence,
         context: RunExecutionContext,
     ) -> AsyncIterator[str]:
-        evidence_text = "\n\n".join(
-            f"{item.filename} 第 {','.join(map(str, item.pages))} 页：{item.text}"
-            for item in evidence
-        )
+        evidence_sections: list[str] = []
+        for subquestion in subquestions:
+            labels = evidence.labels_by_subquestion[subquestion.id]
+            rendered = "\n".join(
+                f"[{label}] {evidence.by_label[label].filename} 第 "
+                f"{','.join(map(str, evidence.by_label[label].pages))} 页："
+                f"{evidence.by_label[label].text}"
+                for label in labels
+            )
+            evidence_sections.append(
+                f"子问题 {subquestion.id}：{subquestion.question}\n"
+                f"该题允许证据：\n{rendered}"
+            )
         messages = [
-            ChatMessage("system", "只根据给定 PDF 证据回答，不补充通用知识，不输出引用标记。"),
+            ChatMessage(
+                "system",
+                "只回答列出的已核验证据充分子问题，只使用给定 PDF 证据，"
+                "不补充通用知识，不回答其他子问题。每个子问题正文前必须先输出且只输出"
+                f"一个内部证据关联头：{GROUNDING_CONTROL_PREFIX}"
+                "<subquestion_id>|<evidence_label,evidence_label>"
+                f"{GROUNDING_CONTROL_SUFFIX}。关联头必须使用该题允许证据中的至少一个"
+                "label；不得省略、重复、跨题关联或在正文中再次输出关联头。",
+            ),
             *prepared.chat_messages(content),
             ChatMessage(
                 "system",
-                f"独立问题：{decision.standalone_question}\n证据：\n{evidence_text}",
+                f"独立问题：{decision.standalone_question}\n"
+                + "\n\n".join(evidence_sections),
             ),
         ]
+        parser = GroundedAnswerParser(evidence.labels_by_subquestion)
         async for event in self._chat.stream_text(
-            messages, timeout_seconds=self._chat_timeout(context)
+            messages,
+            timeout_seconds=self._chat_timeout(context),
+            reasoning_budget_tokens=self._policy.limits.max_answer_thinking_tokens,
         ):
             if isinstance(event, ChatStreamUsage):
                 context.record_usage("ANSWER", event.usage)
             else:
-                yield event.delta
+                visible = parser.feed(event.delta)
+                if visible:
+                    yield visible
+        associations = parser.finish()
+        context.evidence = self._associated_evidence(evidence, associations)
+        context.evidence_token_count = sum(
+            self._retrieval.token_count(item) for item in context.evidence
+        )
+        context.citations = self._citations(context.evidence)
+
+    @staticmethod
+    def _associated_evidence(
+        evidence: RetrievalEvidence,
+        associations: tuple[tuple[str, tuple[str, ...]], ...],
+    ) -> list[Evidence]:
+        selected: list[Evidence] = []
+        seen: set[tuple[str, str]] = set()
+        for _subquestion_id, labels in associations:
+            for label in labels:
+                item = evidence.by_label[label]
+                key = (item.source_id, item.chunk_id)
+                if key not in seen:
+                    seen.add(key)
+                    selected.append(item)
+        return selected
 
     @staticmethod
     def _citations(evidence: list[Evidence]) -> list[dict[str, object]]:
@@ -724,21 +1296,44 @@ class AnsweringService:
             summary_candidates=prepared.summary_candidates,
         )
 
-    async def _route(
+    @classmethod
+    def _deterministic_route(
+        cls, source_scope: dict[str, object], content: str
+    ) -> AnswerRoute:
+        knowledge_mode = source_scope.get("knowledge_mode")
+        if knowledge_mode not in {"DISABLED", "ALL", "SELECTED"}:
+            raise RuntimeError("Answering run source scope is invalid")
+        if knowledge_mode in {"ALL", "SELECTED"}:
+            return AnswerRoute.RETRIEVAL
+        if cls._scope_ids(source_scope, "attachment_ids"):
+            return AnswerRoute.RETRIEVAL
+        normalized = content.casefold()
+        if "pdf" in normalized or any(
+            marker in content for marker in ("附件", "资料", "文档", "知识库")
+        ):
+            return AnswerRoute.RETRIEVAL
+        return AnswerRoute.GENERAL
+
+    async def _understand(
         self,
         prepared: PreparedContext,
         content: str,
         context: RunExecutionContext,
-    ) -> RouteDecision:
+    ) -> UnderstandingResult:
         messages = [
             ChatMessage(
                 "system",
-                "判断问题应走 GENERAL 还是 RETRIEVAL。只返回 JSON："
-                '{"route":"GENERAL|RETRIEVAL","standalone_question":"...",'
-                '"reason_code":"..."}。明确要求 PDF 或资料证据时选择 RETRIEVAL。',
+                "结合受限会话上下文，把当前问题改写为可独立理解的问题。"
+                '只返回严格 JSON 对象：{"standalone_question":"..."}。'
+                "不得返回 route、reason_code、解释或额外字段。",
             ),
             *prepared.chat_messages(content),
         ]
+        correction = ChatMessage(
+            "user",
+            "上一响应不符合 UNDERSTAND JSON contract。请只返回非空 "
+            "standalone_question。",
+        )
         while True:
             try:
                 result = await self._chat.complete_json(
@@ -746,13 +1341,19 @@ class AnsweringService:
                     timeout_seconds=self._chat_timeout(context),
                 )
                 context.record_usage("UNDERSTAND", result.usage)
-                return RouteDecision.model_validate(result.payload)
-            except ValidationError:
+                understanding = UnderstandingResult.model_validate(result.payload)
+                standalone_question = understanding.standalone_question.strip()
+                if not standalone_question:
+                    raise ValueError("UNDERSTAND contains an empty standalone question")
+                return UnderstandingResult(standalone_question=standalone_question)
+            except (ValidationError, ValueError):
                 if context.consume_retry():
+                    messages.append(correction)
                     continue
                 raise
             except ChatError as exc:
                 if exc.retryable and context.consume_retry():
+                    messages.append(correction)
                     continue
                 raise
 
@@ -1083,6 +1684,14 @@ class AnsweringService:
                 used=context.retries_used,
             ),
             retrieval=TraceRetrieval(
+                retrieval_round_count=context.retrieval_round_count,
+                actual_query_count=context.actual_query_count,
+                planned_subquestion_count=context.planned_subquestion_count,
+                sufficient_subquestion_count=context.sufficient_subquestion_count,
+                missing_fact_count=context.missing_fact_count,
+                final_evidence_source_types=sorted(
+                    {item.source_type for item in context.evidence}
+                ),
                 final_evidence_chunk_count=len(context.evidence),
                 final_evidence_token_count=context.evidence_token_count,
             ),
