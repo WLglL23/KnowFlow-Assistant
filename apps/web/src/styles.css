@@ -381,7 +381,9 @@ button:focus-visible, input:focus-visible { outline: 3px solid rgba(21, 87, 246,
 .composer-icon-button { width: 40px; height: 40px; flex: 0 0 40px; display: grid; place-items: center; border: 1px solid #dbe3ef; border-radius: 9px; color: #64738b; background: #fff; }
 .composer-icon-button:hover:not(:disabled) { color: #1e57ba; border-color: #b7c9ec; background: #f5f8fe; }
 .composer-icon-button:disabled { color: #a5aebb; background: #f4f6f9; }
-.message-citations { margin-top: 11px; padding-top: 8px; border-top: 1px solid #edf0f4; }
+.citation-marker { display: inline-flex; align-items: center; justify-content: center; min-width: 1.35em; height: 1.35em; margin-left: 3px; padding: 0 2px; border: 0; border-radius: 50%; color: #2057b4; background: #e8f0ff; font: inherit; font-size: .78em; line-height: 1; vertical-align: super; cursor: pointer; }
+.citation-marker:hover { color: #123f8e; background: #d7e5ff; }
+.message-citations { display: none; }
 .citation-toggle { display: inline-flex; align-items: center; gap: 6px; padding: 2px 0; border: 0; color: #627189; background: transparent; font-size: 11px; font-weight: 680; }
 .citation-toggle:hover { color: #2057b4; }
 .citation-toggle svg:last-child { transition: transform 0.16s ease; }

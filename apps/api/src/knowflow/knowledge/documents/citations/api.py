@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Annotated
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Request, Response
 
@@ -21,10 +22,10 @@ async def citation_preview(
     content, filename = await request.app.state.container.citations.render(
         message_id, citation_index, account.id
     )
-    safe_filename = filename.replace("\"", "")
+    safe_filename = quote(filename.replace('"', ""), safe="")
     return Response(
         content=content,
         status_code=200,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="{safe_filename}"'},
+        headers={"Content-Disposition": f"inline; filename*=UTF-8''{safe_filename}"},
     )
