@@ -21,6 +21,14 @@ class Evidence:
     filename: str
     pages: tuple[int, ...]
     text: str
+    subquestion_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalSource:
+    source_type: str
+    filename: str
+    page_count: int
 
 
 class _EmbeddingItem(BaseModel):
@@ -109,6 +117,11 @@ class AttachmentRetrieval:
             raise RetrievalError("retrieval models are not configured")
 
     async def embed(self, query: str, *, timeout_seconds: float) -> list[float]:
+        return (await self.embed_many([query], timeout_seconds=timeout_seconds))[0]
+
+    async def embed_many(
+        self, queries: list[str], *, timeout_seconds: float
+    ) -> list[list[float]]:
         self.ensure_configured()
         assert self._embedding_base_url and self._embedding_api_key
         try:
@@ -118,13 +131,16 @@ class AttachmentRetrieval:
                     headers={
                         "Authorization": f"Bearer {self._embedding_api_key.get_secret_value()}"
                     },
-                    json={"model": self._embedding_model, "input": [query]},
+                    json={"model": self._embedding_model, "input": queries},
                 )
                 response.raise_for_status()
                 payload = _EmbeddingResponse.model_validate(response.json())
-            if not payload.data or len(payload.data[0].embedding) != self._embedding_dimensions:
+            vectors = [item.embedding for item in payload.data]
+            if len(vectors) != len(queries) or any(
+                len(vector) != self._embedding_dimensions for vector in vectors
+            ):
                 raise RetrievalError("embedding dimension mismatch")
-            return payload.data[0].embedding
+            return vectors
         except RetrievalError:
             raise
         except httpx.HTTPStatusError as exc:
@@ -140,42 +156,61 @@ class AttachmentRetrieval:
         self,
         query: str,
         vector: list[float],
-        source_filenames: dict[str, str],
+        sources: dict[str, RetrievalSource],
         *,
         timeout_seconds: float,
     ) -> list[Evidence]:
-        if not source_filenames:
+        if not sources:
             return []
-        source_filter = {"terms": {"source_id.keyword": list(source_filenames)}}
-        bm25 = {
-            "size": 40,
-            "query": {"bool": {"must": [{"match": {"text": query}}], "filter": [source_filter]}},
-        }
-        dense = {
-            "size": 40,
-            "query": {
-                "script_score": {
-                    "query": {"bool": {"filter": [source_filter]}},
-                    "script": {
-                        "source": "cosineSimilarity(params.query_vector, 'vector') + 1.0",
-                        "params": {"query_vector": vector},
-                    },
-                }
-            },
-        }
         try:
             async with httpx.AsyncClient(timeout=max(timeout_seconds, 0.001)) as client:
-                first = await client.post(f"{self._search_url}/{self._index}/_search", json=bm25)
-                first.raise_for_status()
-                second = await client.post(f"{self._search_url}/{self._index}/_search", json=dense)
-                second.raise_for_status()
-            first_hits = _SearchResponse.model_validate(first.json()).hits.hits
-            second_hits = _SearchResponse.model_validate(second.json()).hits.hits
-            ranked = self._rrf(first_hits, second_hits)
+                grouped_rankings: list[list[_SearchHit]] = []
+                for source_type in sorted({item.source_type for item in sources.values()}):
+                    source_ids = [
+                        source_id
+                        for source_id, item in sources.items()
+                        if item.source_type == source_type
+                    ]
+                    source_filter = {"terms": {"source_id.keyword": source_ids}}
+                    bm25 = {
+                        "size": 40,
+                        "query": {
+                            "bool": {
+                                "must": [{"match": {"text": query}}],
+                                "filter": [source_filter],
+                            }
+                        },
+                    }
+                    dense = {
+                        "size": 40,
+                        "query": {
+                            "script_score": {
+                                "query": {"bool": {"filter": [source_filter]}},
+                                "script": {
+                                    "source": (
+                                        "cosineSimilarity(params.query_vector, 'vector') + 1.0"
+                                    ),
+                                    "params": {"query_vector": vector},
+                                },
+                            }
+                        },
+                    }
+                    first = await client.post(
+                        f"{self._search_url}/{self._index}/_search", json=bm25
+                    )
+                    first.raise_for_status()
+                    second = await client.post(
+                        f"{self._search_url}/{self._index}/_search", json=dense
+                    )
+                    second.raise_for_status()
+                    first_hits = _SearchResponse.model_validate(first.json()).hits.hits
+                    second_hits = _SearchResponse.model_validate(second.json()).hits.hits
+                    grouped_rankings.append(self._rrf(first_hits, second_hits))
+            ranked = self._rrf(*grouped_rankings)
             return [
-                self._to_evidence(hit, source_filenames)
+                self._to_evidence(hit, sources)
                 for hit in ranked
-                if self._valid_hit(hit, source_filenames)
+                if self._valid_hit(hit, sources)
             ]
         except httpx.HTTPError as exc:
             raise RetrievalError("search failed") from exc
@@ -223,11 +258,29 @@ class AttachmentRetrieval:
 
     @staticmethod
     def select(
-        evidence: list[Evidence], *, max_chunks: int, max_tokens: int
+        evidence: list[Evidence],
+        *,
+        max_chunks: int,
+        max_tokens: int,
+        required_subquestion_ids: set[str] | None = None,
     ) -> tuple[list[Evidence], int]:
         selected: list[Evidence] = []
         token_count = 0
+        prioritized: list[Evidence] = []
+        required = required_subquestion_ids or set()
+        for subquestion_id in sorted(required):
+            match = next(
+                (item for item in evidence if item.subquestion_id == subquestion_id), None
+            )
+            if match is not None and match not in prioritized:
+                prioritized.append(match)
+        seen_sources: set[str] = set()
         for item in evidence:
+            if item.source_id not in seen_sources and item not in prioritized:
+                prioritized.append(item)
+                seen_sources.add(item.source_id)
+        prioritized.extend(item for item in evidence if item not in prioritized)
+        for item in prioritized:
             count = EvidenceTokenizerV1.count(item.text)
             if count > max_tokens - token_count:
                 continue
@@ -250,17 +303,24 @@ class AttachmentRetrieval:
         return [hits[key] for key in sorted(scores, key=lambda key: scores[key], reverse=True)]
 
     @staticmethod
-    def _valid_hit(hit: _SearchHit, filenames: dict[str, str]) -> bool:
-        return hit.source.source_id in filenames
+    def _valid_hit(hit: _SearchHit, sources: dict[str, RetrievalSource]) -> bool:
+        expected = sources.get(hit.source.source_id)
+        return (
+            expected is not None
+            and expected.source_type == hit.source.source_type
+            and bool(hit.source.page_numbers)
+            and all(1 <= page <= expected.page_count for page in hit.source.page_numbers)
+        )
 
     @staticmethod
-    def _to_evidence(hit: _SearchHit, filenames: dict[str, str]) -> Evidence:
+    def _to_evidence(hit: _SearchHit, sources: dict[str, RetrievalSource]) -> Evidence:
         source = hit.source
         return Evidence(
             source_type=source.source_type,
             source_id=source.source_id,
             chunk_id=source.chunk_id,
-            filename=filenames[source.source_id],
+            filename=sources[source.source_id].filename,
             pages=tuple(source.page_numbers),
             text=source.text,
+            subquestion_id="",
         )

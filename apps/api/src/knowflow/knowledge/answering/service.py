@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
@@ -47,12 +47,20 @@ from knowflow.knowledge.answering.models import (
     StageStatus,
 )
 from knowflow.knowledge.answering.policy import RunPolicy
-from knowflow.knowledge.answering.retrieval import AttachmentRetrieval, Evidence, RetrievalError
+from knowflow.knowledge.answering.retrieval import (
+    AttachmentRetrieval,
+    Evidence,
+    RetrievalError,
+    RetrievalSource,
+)
 from knowflow.knowledge.answering.trace import (
     RunTraceV1,
+    TraceEvidenceSource,
     TraceRetrieval,
+    TraceRetrievalLimits,
     TraceRetry,
     TraceStageTiming,
+    TraceSubquestion,
     TraceTermination,
     TraceTiming,
     TraceUsage,
@@ -61,7 +69,7 @@ from knowflow.knowledge.answering.trace import (
 )
 from knowflow.knowledge.conversations.models import Conversation
 from knowflow.knowledge.conversations.service import allowed_source_scope
-from knowflow.knowledge.documents.models import ConversationAttachment
+from knowflow.knowledge.documents.models import ConversationAttachment, KnowledgeSubmission
 
 
 class RouteDecision(BaseModel):
@@ -78,7 +86,28 @@ class RetrievalPlan(BaseModel):
     queries: list[str]
 
 
-class VerificationDecision(BaseModel):
+@dataclass(frozen=True, slots=True)
+class Subquestion:
+    id: str
+    query: str
+
+
+class SubquestionVerification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subquestion_id: str
+    sufficient: bool
+    missing_facts: list[str]
+    supplemental_query: str | None = None
+
+
+class VerificationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    results: list[SubquestionVerification]
+
+
+class LegacyVerificationDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     coverage: Literal["FULL", "NONE"]
@@ -106,6 +135,10 @@ class RunExecutionContext:
     evidence: list[Evidence] = field(default_factory=lambda: [])
     evidence_token_count: int = 0
     citations: list[dict[str, object]] = field(default_factory=lambda: [])
+    missing_facts: list[str] = field(default_factory=lambda: [])
+    actual_queries: int = 0
+    retrieval_rounds: int = 0
+    verifications: list[SubquestionVerification] = field(default_factory=lambda: [])
 
     @property
     def answer(self) -> str:
@@ -367,8 +400,14 @@ class AnsweringService:
         prepared = await self._prepare(conversation_id, user_message_id)
         if prepared.summary_candidates:
             prepared = await self._summarize(conversation_id, prepared, context)
+        sources = await self._retrieval_sources(run_id)
         try:
-            decision = await self._route(prepared, content, context)
+            decision = await self._route(
+                prepared,
+                content,
+                has_allowed_sources=bool(sources),
+                context=context,
+            )
         except (ChatError, ValidationError) as exc:
             raise RunExecutionError("MODEL_FAILED") from exc
         context.route = decision.route
@@ -378,11 +417,14 @@ class AnsweringService:
         yield StageEvent("stage.completed", request_id, run_id, StageName.UNDERSTAND.value)
 
         if decision.route is AnswerRoute.RETRIEVAL:
-            source_filenames = await self._source_filenames(run_id)
-            if source_filenames:
+            if sources:
                 await self._enter_stage(run_id, StageName.PLAN, context)
                 yield StageEvent("stage.started", request_id, run_id, StageName.PLAN.value)
                 plan = await self._plan(prepared, decision, context)
+                subquestions = [
+                    Subquestion(id=f"sq_{index}", query=query)
+                    for index, query in enumerate(plan.queries, 1)
+                ]
                 await self._complete_stage(context.current_stage_id)
                 context.current_stage_id = None
                 context.current_stage = None
@@ -390,11 +432,12 @@ class AnsweringService:
 
                 await self._enter_stage(run_id, StageName.RETRIEVE_1, context)
                 yield StageEvent("stage.started", request_id, run_id, StageName.RETRIEVE_1.value)
-                context.evidence = await self._retrieve(plan, source_filenames, context)
+                context.evidence = await self._retrieve(subquestions, sources, context)
                 context.evidence, context.evidence_token_count = self._retrieval.select(
                     context.evidence,
                     max_chunks=self._policy.limits.max_evidence_chunks,
                     max_tokens=self._policy.limits.max_evidence_tokens,
+                    required_subquestion_ids={item.id for item in subquestions},
                 )
                 await self._complete_stage(context.current_stage_id)
                 context.current_stage_id = None
@@ -403,18 +446,95 @@ class AnsweringService:
 
                 await self._enter_stage(run_id, StageName.VERIFY, context)
                 yield StageEvent("stage.started", request_id, run_id, StageName.VERIFY.value)
-                verification = await self._verify(plan, context.evidence, context)
-                context.coverage = verification.coverage
+                verifications = await self._verify(subquestions, context.evidence, context)
+                context.verifications = verifications
+                context.coverage = self._aggregate_coverage(verifications)
                 await self._complete_stage(context.current_stage_id)
                 context.current_stage_id = None
                 context.current_stage = None
                 yield StageEvent("stage.completed", request_id, run_id, StageName.VERIFY.value)
 
+                supplemental = [
+                    Subquestion(item.subquestion_id, item.supplemental_query.strip())
+                    for item in verifications
+                    if not item.sufficient
+                    and item.supplemental_query is not None
+                    and item.supplemental_query.strip()
+                ]
+                if supplemental:
+                    await self._enter_stage(run_id, StageName.RETRIEVE_2, context)
+                    yield StageEvent(
+                        "stage.started", request_id, run_id, StageName.RETRIEVE_2.value
+                    )
+                    additional = await self._retrieve(
+                        supplemental,
+                        sources,
+                        context,
+                    )
+                    context.evidence = self._deduplicate_evidence(
+                        [*additional, *context.evidence]
+                    )
+                    context.evidence, context.evidence_token_count = self._retrieval.select(
+                        context.evidence,
+                        max_chunks=self._policy.limits.max_evidence_chunks,
+                        max_tokens=self._policy.limits.max_evidence_tokens,
+                        required_subquestion_ids={item.id for item in subquestions},
+                    )
+                    await self._complete_stage(context.current_stage_id)
+                    context.current_stage_id = None
+                    context.current_stage = None
+                    yield StageEvent(
+                        "stage.completed", request_id, run_id, StageName.RETRIEVE_2.value
+                    )
+
+                    await self._enter_stage(run_id, StageName.VERIFY, context)
+                    yield StageEvent("stage.started", request_id, run_id, StageName.VERIFY.value)
+                    gap_results = await self._verify(
+                        supplemental, context.evidence, context
+                    )
+                    gap_by_id = {item.subquestion_id: item for item in gap_results}
+                    verifications = [
+                        gap_by_id.get(item.subquestion_id, item) for item in verifications
+                    ]
+                    context.verifications = verifications
+                    context.coverage = self._aggregate_coverage(verifications)
+                    await self._complete_stage(context.current_stage_id)
+                    context.current_stage_id = None
+                    context.current_stage = None
+                    yield StageEvent("stage.completed", request_id, run_id, StageName.VERIFY.value)
+
+                context.missing_facts = list(
+                    dict.fromkeys(
+                        fact
+                        for item in verifications
+                        if not item.sufficient
+                        for fact in item.missing_facts
+                    )
+                )
+                sufficient_ids = {
+                    item.subquestion_id for item in verifications if item.sufficient
+                }
+                final_candidates = [
+                    item
+                    for item in context.evidence
+                    if item.subquestion_id in sufficient_ids
+                ]
+                context.evidence, context.evidence_token_count = self._retrieval.select(
+                    final_candidates,
+                    max_chunks=self._policy.limits.max_evidence_chunks,
+                    max_tokens=self._policy.limits.max_evidence_tokens,
+                    required_subquestion_ids=sufficient_ids,
+                )
+                if sufficient_ids - {item.subquestion_id for item in context.evidence}:
+                    raise RunExecutionError("INTERNAL_ERROR")
                 await self._enter_stage(run_id, StageName.GENERATE, context)
                 yield StageEvent("stage.started", request_id, run_id, StageName.GENERATE.value)
                 try:
-                    if verification.coverage == "FULL":
+                    if context.coverage in {"FULL", "PARTIAL"}:
                         context.citations = self._citations(context.evidence)
+                        self._validate_citations(
+                            context.evidence, context.citations, sufficient_ids
+                        )
                         async for delta in self._generate_grounded(
                             prepared, content, decision, context.evidence, context
                         ):
@@ -423,8 +543,15 @@ class AnsweringService:
                                 yield AnswerDeltaEvent("answer.delta", request_id, run_id, visible)
                             if exceeded:
                                 raise RunExecutionError("RUN_LIMIT_EXCEEDED")
+                        if context.coverage == "PARTIAL":
+                            suffix = self._partial_suffix(verifications)
+                            visible, exceeded = self._append_visible_delta(context, suffix)
+                            if visible:
+                                yield AnswerDeltaEvent("answer.delta", request_id, run_id, visible)
+                            if exceeded:
+                                raise RunExecutionError("RUN_LIMIT_EXCEEDED")
                     else:
-                        refusal = "当前证据不足，无法可靠回答该问题。请补充包含相关事实的 PDF。"
+                        refusal = self._none_refusal(verifications)
                         visible, exceeded = self._append_visible_delta(context, refusal)
                         if visible:
                             yield AnswerDeltaEvent("answer.delta", request_id, run_id, visible)
@@ -488,28 +615,60 @@ class AnsweringService:
         context.terminal_committed = True
         yield RunCompletedEvent("run.completed", request_id, run_id, assistant_message_id)
 
-    async def _source_filenames(self, run_id: str) -> dict[str, str]:
+    async def _retrieval_sources(self, run_id: str) -> dict[str, RetrievalSource]:
         async with self._sessions() as session:
             run = await session.get(AgentRun, run_id)
             if run is None:
                 raise RuntimeError("Answering run is missing")
-            raw_ids = run.source_scope_json.get("attachment_ids")
-            if not isinstance(raw_ids, list):
+            raw_attachment_ids = run.source_scope_json.get("attachment_ids")
+            raw_source_ids = run.source_scope_json.get("knowledge_source_ids")
+            if not isinstance(raw_attachment_ids, list) or not isinstance(raw_source_ids, list):
                 raise RuntimeError("Answering run source scope is invalid")
-            id_values = cast(list[object], raw_ids)
-            if not all(isinstance(item, str) for item in id_values):
+            attachment_values = cast(list[object], raw_attachment_ids)
+            source_values = cast(list[object], raw_source_ids)
+            if not all(isinstance(item, str) for item in [*attachment_values, *source_values]):
                 raise RuntimeError("Answering run source scope is invalid")
-            ids = cast(list[str], id_values)
-            if not ids:
-                return {}
-            items = list(
+            attachment_ids = cast(list[str], attachment_values)
+            source_ids = cast(list[str], source_values)
+            attachments = list(
                 (
                     await session.scalars(
-                        select(ConversationAttachment).where(ConversationAttachment.id.in_(ids))
+                        select(ConversationAttachment).where(
+                            ConversationAttachment.id.in_(attachment_ids)
+                        )
                     )
                 ).all()
             )
-        return {item.id: item.filename for item in items if item.id in ids}
+            sources = list(
+                (
+                    await session.scalars(
+                        select(KnowledgeSubmission).where(
+                            KnowledgeSubmission.id.in_(source_ids)
+                        )
+                    )
+                ).all()
+            )
+        sources_by_id = {
+            item.id: RetrievalSource(
+                source_type="ATTACHMENT",
+                filename=item.filename,
+                page_count=item.page_count,
+            )
+            for item in attachments
+            if item.id in attachment_ids
+        }
+        sources_by_id.update(
+            {
+                item.id: RetrievalSource(
+                    source_type="KNOWLEDGE",
+                    filename=item.filename,
+                    page_count=item.page_count,
+                )
+                for item in sources
+                if item.id in source_ids
+            }
+        )
+        return sources_by_id
 
     async def _plan(
         self, prepared: PreparedContext, decision: RouteDecision, context: RunExecutionContext
@@ -530,7 +689,9 @@ class AnsweringService:
                 queries = [query.strip() for query in plan.queries if query.strip()]
                 if not queries:
                     raise ValidationError.from_exception_data("RetrievalPlan", [])
-                return RetrievalPlan(queries=queries[:1])
+                if len(queries) > self._policy.limits.max_subquestions:
+                    raise RunExecutionError("RUN_LIMIT_EXCEEDED")
+                return RetrievalPlan(queries=list(dict.fromkeys(queries)))
             except (ValidationError, ChatError) as exc:
                 retryable = isinstance(exc, ValidationError) or exc.retryable
                 if retryable and context.consume_retry():
@@ -539,26 +700,55 @@ class AnsweringService:
 
     async def _retrieve(
         self,
-        plan: RetrievalPlan,
-        source_filenames: dict[str, str],
+        subquestions: list[Subquestion],
+        sources: dict[str, RetrievalSource],
         context: RunExecutionContext,
     ) -> list[Evidence]:
-        query = plan.queries[0]
+        queries = [item.query for item in subquestions]
+        if context.retrieval_rounds >= self._policy.limits.max_retrieval_rounds:
+            raise RunExecutionError("RUN_LIMIT_EXCEEDED")
+        if context.actual_queries + len(queries) > self._policy.limits.max_actual_queries:
+            raise RunExecutionError("RUN_LIMIT_EXCEEDED")
+        context.retrieval_rounds += 1
+        context.actual_queries += len(queries)
         while True:
             try:
-                vector = await self._retrieval.embed(
-                    query, timeout_seconds=self._chat_timeout(context)
+                vectors = await self._retrieval.embed_many(
+                    queries, timeout_seconds=self._chat_timeout(context)
                 )
                 break
             except RetrievalError as exc:
                 if not (exc.retryable and context.consume_retry()):
                     raise RunExecutionError("RETRIEVAL_FAILED") from exc
-        try:
-            evidence = await self._retrieval.hybrid(
-                query, vector, source_filenames, timeout_seconds=self._chat_timeout(context)
-            )
-        except RetrievalError as exc:
-            raise RunExecutionError("RETRIEVAL_FAILED") from exc
+        evidence: list[Evidence] = []
+        for subquestion, vector in zip(subquestions, vectors, strict=True):
+            try:
+                hits = await self._retrieval.hybrid(
+                    subquestion.query,
+                    vector,
+                    sources,
+                    timeout_seconds=self._chat_timeout(context),
+                )
+                associated = [
+                    replace(item, subquestion_id=subquestion.id) for item in hits
+                ]
+                evidence.extend(
+                    await self._rerank(
+                        subquestion.query,
+                        associated,
+                        context,
+                    )
+                )
+            except RetrievalError as exc:
+                raise RunExecutionError("RETRIEVAL_FAILED") from exc
+        return self._deduplicate_evidence(evidence)
+
+    async def _rerank(
+        self,
+        query: str,
+        evidence: list[Evidence],
+        context: RunExecutionContext,
+    ) -> list[Evidence]:
         while True:
             try:
                 return await self._retrieval.rerank(
@@ -568,20 +758,57 @@ class AnsweringService:
                 if not (exc.retryable and context.consume_retry()):
                     raise RunExecutionError("RETRIEVAL_FAILED") from exc
 
+    @staticmethod
+    def _deduplicate_evidence(evidence: list[Evidence]) -> list[Evidence]:
+        by_chunk: dict[tuple[str, str], Evidence] = {}
+        for item in evidence:
+            by_chunk.setdefault((item.chunk_id, item.subquestion_id), item)
+        return list(by_chunk.values())
+
+    @staticmethod
+    def _partial_suffix(results: list[SubquestionVerification]) -> str:
+        gaps = [
+            f"{item.subquestion_id}（{'、'.join(item.missing_facts) or '证据不足'}）"
+            for item in results
+            if not item.sufficient
+        ]
+        return f"\n\n仍无法回答：{'；'.join(gaps)}。当前证据不足。"
+
+    @staticmethod
+    def _none_refusal(results: list[SubquestionVerification]) -> str:
+        gaps = [
+            f"{item.subquestion_id}（{'、'.join(item.missing_facts) or '证据不足'}）"
+            for item in results
+        ]
+        return (
+            "当前证据不足，无法可靠回答："
+            + "；".join(gaps)
+            + "。请补充包含相关事实的 PDF。"
+        )
+
     async def _verify(
-        self, plan: RetrievalPlan, evidence: list[Evidence], context: RunExecutionContext
-    ) -> VerificationDecision:
+        self,
+        subquestions: list[Subquestion],
+        evidence: list[Evidence],
+        context: RunExecutionContext,
+    ) -> list[SubquestionVerification]:
         evidence_text = "\n\n".join(
-            f"来源：{item.filename} 页码：{','.join(map(str, item.pages))}\n{item.text}"
+            f"子问题：{item.subquestion_id} 来源：{item.filename} "
+            f"页码：{','.join(map(str, item.pages))}\n{item.text}"
             for item in evidence
         )
         messages = [
             ChatMessage(
                 "system",
-                "核验证据是否足以回答问题。只返回 JSON："
-                "{\"coverage\":\"FULL|NONE\",\"missing_facts\":[\"...\"]}。",
+                "分别核验证据是否足以回答每个子问题。每题最多提供一个补充查询。"
+                "只返回逐题 JSON 结果。",
             ),
-            ChatMessage("user", f"问题：{plan.queries[0]}\n证据：\n{evidence_text}"),
+            ChatMessage(
+                "user",
+                "子问题："
+                + "；".join(f"{item.id}:{item.query}" for item in subquestions)
+                + f"\n证据：\n{evidence_text}",
+            ),
         ]
         while True:
             try:
@@ -589,12 +816,57 @@ class AnsweringService:
                     messages, timeout_seconds=self._chat_timeout(context)
                 )
                 context.record_usage("VERIFY", result.usage)
-                return VerificationDecision.model_validate(result.payload)
+                return self._verification_results(result.payload, subquestions)
             except (ValidationError, ChatError) as exc:
                 retryable = isinstance(exc, ValidationError) or exc.retryable
                 if retryable and context.consume_retry():
                     continue
                 raise RunExecutionError("MODEL_FAILED") from exc
+
+    @staticmethod
+    def _verification_results(
+        payload: dict[str, object], subquestions: list[Subquestion]
+    ) -> list[SubquestionVerification]:
+        try:
+            response = VerificationResponse.model_validate(payload)
+            results = response.results
+        except ValidationError:
+            if len(subquestions) != 1:
+                raise
+            legacy = LegacyVerificationDecision.model_validate(payload)
+            results = [
+                SubquestionVerification(
+                    subquestion_id=subquestions[0].id,
+                    sufficient=legacy.coverage == "FULL",
+                    missing_facts=legacy.missing_facts,
+                )
+            ]
+        expected = {item.id for item in subquestions}
+        actual = [item.subquestion_id for item in results]
+        if len(actual) != len(set(actual)) or set(actual) != expected:
+            raise ValidationError.from_exception_data("VerificationResponse", [])
+        return [
+            item.model_copy(
+                update={
+                    "missing_facts": list(dict.fromkeys(item.missing_facts)),
+                    "supplemental_query": (
+                        item.supplemental_query.strip()
+                        if item.supplemental_query and item.supplemental_query.strip()
+                        else None
+                    ),
+                }
+            )
+            for item in results
+        ]
+
+    @staticmethod
+    def _aggregate_coverage(results: list[SubquestionVerification]) -> str:
+        sufficient = sum(item.sufficient for item in results)
+        if sufficient == len(results):
+            return "FULL"
+        if sufficient:
+            return "PARTIAL"
+        return "NONE"
 
     async def _generate_grounded(
         self,
@@ -650,6 +922,23 @@ class AnsweringService:
                 )
                 current["pages"] = list(dict.fromkeys(pages + list(item.pages)))[:5]
         return citations
+
+    @staticmethod
+    def _validate_citations(
+        evidence: list[Evidence],
+        citations: list[dict[str, object]],
+        sufficient_ids: set[str],
+    ) -> None:
+        cited_source_ids = {
+            item.get("source_id") for item in citations if isinstance(item.get("source_id"), str)
+        }
+        supported_ids = {
+            item.subquestion_id
+            for item in evidence
+            if item.source_id in cited_source_ids and item.pages
+        }
+        if supported_ids != sufficient_ids:
+            raise RunExecutionError("INTERNAL_ERROR")
 
     async def _require_owner(self, actor_id: str, conversation_id: str) -> None:
         async with self._sessions() as session:
@@ -728,14 +1017,20 @@ class AnsweringService:
         self,
         prepared: PreparedContext,
         content: str,
+        *,
+        has_allowed_sources: bool,
         context: RunExecutionContext,
     ) -> RouteDecision:
+        source_hint = "有" if has_allowed_sources else "无"
         messages = [
             ChatMessage(
                 "system",
                 "判断问题应走 GENERAL 还是 RETRIEVAL。只返回 JSON："
                 '{"route":"GENERAL|RETRIEVAL","standalone_question":"...",'
-                '"reason_code":"..."}。明确要求 PDF 或资料证据时选择 RETRIEVAL。',
+                f'"reason_code":"..."}}。当前 Run 已冻结允许 PDF 来源：{source_hint}。'
+                "有允许来源时，定义、事实、比较、流程和资料内容等自然知识问题优先选择 "
+                "RETRIEVAL；仅闲聊、创作、计算或明确无需资料时选择 GENERAL。"
+                "没有允许来源但明确要求 PDF 或资料证据时仍选择 RETRIEVAL。",
             ),
             *prepared.chat_messages(content),
         ]
@@ -1063,6 +1358,57 @@ class AnsweringService:
         termination: str | None,
     ) -> RunTraceV1:
         calls = context.usage_calls
+        sources: list[TraceEvidenceSource] = []
+        for item in context.evidence:
+            current = next(
+                (source for source in sources if source.source_id == item.source_id),
+                None,
+            )
+            if current is None:
+                sources.append(
+                    TraceEvidenceSource(
+                        source_type=item.source_type,
+                        source_id=item.source_id,
+                        pages=list(item.pages[:5]),
+                    )
+                )
+            else:
+                current.pages = list(dict.fromkeys([*current.pages, *item.pages]))[:5]
+        subquestions: list[TraceSubquestion] = []
+        for verification in context.verifications:
+            item_sources: list[TraceEvidenceSource] = []
+            for item in context.evidence:
+                if item.subquestion_id != verification.subquestion_id:
+                    continue
+                current = next(
+                    (
+                        source
+                        for source in item_sources
+                        if source.source_id == item.source_id
+                    ),
+                    None,
+                )
+                if current is None:
+                    item_sources.append(
+                        TraceEvidenceSource(
+                            source_type=item.source_type,
+                            source_id=item.source_id,
+                            pages=list(item.pages[:5]),
+                        )
+                    )
+                else:
+                    current.pages = list(
+                        dict.fromkeys([*current.pages, *item.pages])
+                    )[:5]
+            subquestions.append(
+                TraceSubquestion(
+                    subquestion_id=verification.subquestion_id,
+                    sufficient=verification.sufficient,
+                    missing_facts=verification.missing_facts,
+                    sources=item_sources,
+                )
+            )
+        limits = self._policy.limits
         return RunTraceV1(
             versions=TraceVersions(
                 trace_version=self._policy.trace_version,
@@ -1085,6 +1431,18 @@ class AnsweringService:
             retrieval=TraceRetrieval(
                 final_evidence_chunk_count=len(context.evidence),
                 final_evidence_token_count=context.evidence_token_count,
+                actual_query_count=context.actual_queries,
+                retrieval_round_count=context.retrieval_rounds,
+                missing_facts=context.missing_facts,
+                sources=sources,
+                subquestions=subquestions,
+                limits=TraceRetrievalLimits(
+                    max_subquestions=limits.max_subquestions,
+                    max_retrieval_rounds=limits.max_retrieval_rounds,
+                    max_actual_queries=limits.max_actual_queries,
+                    max_evidence_chunks=limits.max_evidence_chunks,
+                    max_evidence_tokens=limits.max_evidence_tokens,
+                ),
             ),
             termination=(None if termination is None else TraceTermination(reason=termination)),
         )

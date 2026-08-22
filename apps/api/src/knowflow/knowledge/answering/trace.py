@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TraceVersions(BaseModel):
@@ -56,11 +56,48 @@ class TraceTermination(BaseModel):
     reason: str
 
 
+class TraceEvidenceSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_type: str
+    source_id: str
+    pages: list[int]
+
+
+class TraceSubquestion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subquestion_id: str
+    sufficient: bool
+    missing_facts: list[str]
+    sources: list[TraceEvidenceSource]
+
+
+class TraceRetrievalLimits(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_subquestions: int
+    max_retrieval_rounds: int
+    max_actual_queries: int
+    max_evidence_chunks: int
+    max_evidence_tokens: int
+
+
 class TraceRetrieval(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     final_evidence_chunk_count: int
     final_evidence_token_count: int
+    actual_query_count: int = 0
+    retrieval_round_count: int = 0
+    missing_facts: list[str] = Field(default_factory=lambda: list[str]())
+    sources: list[TraceEvidenceSource] = Field(
+        default_factory=lambda: list[TraceEvidenceSource]()
+    )
+    subquestions: list[TraceSubquestion] = Field(
+        default_factory=lambda: list[TraceSubquestion]()
+    )
+    limits: TraceRetrievalLimits
 
 
 class RunTraceV1(BaseModel):
