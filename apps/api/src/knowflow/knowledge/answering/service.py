@@ -6,7 +6,7 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import or_, select
@@ -87,6 +87,9 @@ from knowflow.knowledge.answering.trace_projection import (
 from knowflow.knowledge.conversations.models import Conversation
 from knowflow.knowledge.conversations.service import allowed_source_scope
 from knowflow.knowledge.documents.models import ConversationAttachment
+
+if TYPE_CHECKING:
+    from knowflow.knowledge.documents.cleanup import CleanupDocuments
 
 
 class RouteDecision(BaseModel):
@@ -222,11 +225,13 @@ class AnsweringService:
         chat: ChatClient,
         policy: RunPolicy,
         retrieval: AttachmentRetrieval,
+        cleanup: CleanupDocuments | None = None,
     ) -> None:
         self._sessions = sessions
         self._chat = chat
         self._policy = policy
         self._retrieval = retrieval
+        self._cleanup = cleanup
         self._settlement_tasks: set[asyncio.Task[None]] = set()
 
     async def accept_turn(
@@ -1126,6 +1131,8 @@ class AnsweringService:
             trace_version=self._policy.trace_version,
             policy_version=self._policy.policy_version,
         )
+        if self._cleanup is not None:
+            await self._cleanup.on_run_terminal(run_id)
 
     async def _converge_failure(
         self,
@@ -1150,6 +1157,8 @@ class AnsweringService:
             policy_version=self._policy.policy_version,
             error_code=error_code,
         )
+        if self._cleanup is not None:
+            await self._cleanup.on_run_terminal(run_id)
 
     def _schedule_interruption(
         self,
@@ -1193,9 +1202,12 @@ class AnsweringService:
             )
             assistant_message.content = context.answer
             assistant_message.status = MessageStatus.PARTIAL
+        if self._cleanup is not None:
+            await self._cleanup.on_run_terminal(run_id)
 
     async def recover_interrupted_runs(self) -> None:
         now = self._utc_now()
+        recovered_ids: list[str] = []
         async with self._sessions() as session, session.begin():
             runs = list(
                 (
@@ -1240,6 +1252,10 @@ class AnsweringService:
                     assistant.status = MessageStatus.PARTIAL
                     if user_message is not None and assistant.created_at <= user_message.created_at:
                         assistant.created_at = user_message.created_at + timedelta(microseconds=1)
+                recovered_ids.append(run.id)
+        if self._cleanup is not None:
+            for run_id in recovered_ids:
+                await self._cleanup.on_run_terminal(run_id)
 
     async def _terminal_trace(
         self,

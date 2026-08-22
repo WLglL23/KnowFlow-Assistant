@@ -34,6 +34,8 @@ from knowflow.knowledge.documents.api import router as documents_router
 from knowflow.knowledge.documents.attachments import AttachmentDocuments
 from knowflow.knowledge.documents.citations import CitationPreview
 from knowflow.knowledge.documents.citations.api import router as citation_router
+from knowflow.knowledge.documents.cleanup import CleanupDocuments
+from knowflow.knowledge.documents.cleanup.api import router as cleanup_router
 from knowflow.knowledge.documents.object_store import PrivateObjectStore
 from knowflow.knowledge.documents.pdf import PdfDocuments
 from knowflow.knowledge.documents.publication import PublicationDocuments
@@ -105,17 +107,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         rerank_api_key=resolved_settings.rerank_api_key,
         rerank_model=resolved_settings.rerank_model,
     )
-    answering = AnsweringService(
-        sessions,
-        chat,
-        core_experimental_policy(resolved_settings.run_deadline_seconds),
-        retrieval,
-    )
     pdf = PdfDocuments(resolved_settings)
     objects = PrivateObjectStore(resolved_settings)
     documents = AttachmentDocuments(sessions, resolved_settings, pdf, objects)
     submissions = SubmissionDocuments(sessions, resolved_settings, pdf, objects)
     publication = PublicationDocuments(sessions, resolved_settings, pdf, objects)
+    cleanup = CleanupDocuments(sessions, resolved_settings, objects)
+    answering = AnsweringService(
+        sessions,
+        chat,
+        core_experimental_policy(resolved_settings.run_deadline_seconds),
+        retrieval,
+        cleanup=cleanup,
+    )
     citations = CitationPreview(sessions, documents)
     container = AppContainer(
         settings=resolved_settings,
@@ -129,6 +133,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         submissions=submissions,
         publication=publication,
         citations=citations,
+        cleanup=cleanup,
     )
 
     @asynccontextmanager
@@ -137,6 +142,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             await identity.initialize_seed_accounts(resolved_settings)
             await answering.recover_interrupted_runs()
+            await cleanup.recover_startup()
             await documents.start()
             yield
         finally:
@@ -167,4 +173,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin_submissions_router)
     app.include_router(publication_router)
     app.include_router(user_publication_router)
+    app.include_router(cleanup_router)
     return app
