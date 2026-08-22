@@ -7,10 +7,12 @@ from dataclasses import dataclass
 class RunLimits:
     deadline_seconds: int
     max_subquestions: int = 5
-    max_retrieval_rounds: int = 2
-    max_actual_queries: int = 10
-    max_evidence_chunks: int = 8
-    max_evidence_tokens: int = 6000
+    max_retrieval_rounds: int = 1
+    max_actual_queries: int = 5
+    max_evidence_chunks: int = 15
+    max_evidence_tokens: int = 12000
+    max_subquestion_evidence_chunks: int = 4
+    max_subquestion_evidence_tokens: int = 3200
     max_retries: int = 1
     max_verify_thinking_tokens: int = 2048
     max_answer_thinking_tokens: int = 2048

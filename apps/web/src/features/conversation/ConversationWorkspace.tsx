@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, BookOpen, Check, ChevronDown, ChevronLeft, FileCheck2, Library, LogOut, MessageSquare, PanelLeft, Pencil, Plus, X } from "lucide-react";
+import { AlertCircle, Check, ChevronLeft, FileCheck2, Library, LogOut, MessageSquare, PanelLeft, Pencil, Plus, X } from "lucide-react";
 import Markdown from "react-markdown";
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 
@@ -50,28 +50,17 @@ function roleLabel(role: Account["role"], isGuest: boolean): string {
   return role === "ADMIN" ? "管理员" : "员工";
 }
 
-function MessageCitations({ messageId, citations, onSelect }: { messageId: string; citations: Citation[]; onSelect: (selection: CitationSelection) => void }) {
-  const [expanded, setExpanded] = useState(false);
-
-  return (
-    <div className="message-citations">
-      <button className="citation-toggle" type="button" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
-        <BookOpen size={14} />
-        <span>引用来源 {citations.length}</span>
-        <ChevronDown className={expanded ? "expanded" : ""} size={15} />
-      </button>
-      {expanded && (
-        <div className="citation-list" aria-label="回答引用">
-          {citations.map((citation, citationIndex) => (
-            <button key={`${messageId}-${citationIndex}`} type="button" className="citation-chip" onClick={() => onSelect({ messageId, citationIndex, citation })}>
-              <span title={citation.filename}>{citation.filename}</span>
-              <small>第 {citation.pages.join("、")} 页</small>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+function MessageContent({ messageId, content, citations, onSelect }: { messageId: string; content: string; citations: Citation[]; onSelect: (selection: CitationSelection) => void }) {
+  const parts = content.split(/(\[\[citation:\d+\]\])/g);
+  return <>{parts.map((part, index) => {
+    const match = part.match(/^\[\[citation:(\d+)\]\]$/);
+    if (!match) return <Markdown key={`${messageId}-text-${index}`}>{part}</Markdown>;
+    const citationIndex = Number(match[1]);
+    const citation = citations[citationIndex];
+    if (!citation) return null;
+    const glyph = citationIndex < 9 ? String.fromCharCode(9312 + citationIndex) : `[${citationIndex + 1}]`;
+    return <button key={`${messageId}-citation-${citationIndex}-${index}`} className="citation-marker" type="button" title={`打开 ${citation.filename} 第 ${citation.pages.join("、")} 页`} onClick={() => onSelect({ messageId, citationIndex, citation })}>{glyph}</button>;
+  })}</>;
 }
 
 type WorkspaceView = "conversations" | "knowledge" | "adminKnowledge";
@@ -255,7 +244,7 @@ export function ConversationWorkspace({
           {selected && detail.isPending && <div className="empty-detail"><p>正在加载会话详情…</p></div>}
           {selected && detail.isError && <div className="empty-detail query-error" role="alert"><AlertCircle size={24} /><h3>{errorMessage(detail.error)}</h3><button type="button" onClick={() => void detail.refetch()}>重新加载</button></div>}
           {selected && !detail.isPending && !detail.isError && messages.length === 0 && !streaming && <div className="empty-detail"><MessageSquare size={30} /><h3>开始一段对话</h3><p>上传 PDF，或直接输入问题。</p></div>}
-          {messages.map((message) => <article key={message.id} className={`message ${message.role === "USER" ? "user" : "assistant"}`}><div className="message-role">{message.role === "USER" ? "你" : "知办助手"}<time>{formatTime(message.created_at)}</time></div><div className="message-content">{message.role === "ASSISTANT" ? <>{message.content ? <Markdown>{message.content}</Markdown> : message.status === "PARTIAL" ? <span className="message-empty">回答未生成。</span> : null}{message.status === "PARTIAL" && <div className="message-error">错误：回答未完成</div>}{message.citations.length > 0 && <MessageCitations messageId={message.id} citations={message.citations} onSelect={setCitationSelection} />}</> : message.content}</div></article>)}
+          {messages.map((message) => <article key={message.id} className={`message ${message.role === "USER" ? "user" : "assistant"}`}><div className="message-role">{message.role === "USER" ? "你" : "知办助手"}<time>{formatTime(message.created_at)}</time></div><div className="message-content">{message.role === "ASSISTANT" ? <>{message.content ? <MessageContent messageId={message.id} content={message.content} citations={message.citations} onSelect={setCitationSelection} /> : message.status === "PARTIAL" ? <span className="message-empty">回答未生成。</span> : null}{message.status === "PARTIAL" && <div className="message-error">错误：回答未完成</div>}</> : message.content}</div></article>)}
           {streaming && <article className="message assistant"><div className="message-role">知办助手<span className="streaming-label">{stage ? stageLabels[stage] ?? stage : "等待接受"}</span></div><div className="message-content">{streamText ? <Markdown>{streamText}</Markdown> : <span className="typing-indicator">{stage ? `${stageLabels[stage] ?? stage}…` : "请求已提交，等待服务响应…"}</span>}</div></article>}
         </div>
         {error && <div className="conversation-error" role="alert"><AlertCircle size={17} />{error}</div>}

@@ -96,7 +96,22 @@ class RunEventStreamResponse(Response):
 
 
 def _encode_event(event: AnsweringEvent) -> bytes:
-    event_data = asdict(event)
-    event_data.pop("type")
+    raw = asdict(event)
+    if event.type == "stage.started" or event.type == "stage.completed":
+        event_data = {key: raw[key] for key in ("request_id", "run_id", "stage")}
+    elif event.type == "answer.delta":
+        event_data = {key: raw[key] for key in ("request_id", "run_id", "delta")}
+    elif event.type == "run.completed":
+        event_data = {
+            key: raw[key]
+            for key in ("request_id", "run_id", "assistant_message_id")
+        }
+    elif event.type == "run.failed":
+        event_data = {
+            key: raw[key]
+            for key in ("request_id", "run_id", "assistant_message_id", "error")
+        }
+    else:
+        raise ValueError(f"unsupported answering event: {event.type}")
     payload = json.dumps(event_data, ensure_ascii=False, separators=(",", ":"))
     return f"event: {event.type}\ndata: {payload}\n\n".encode()

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -35,6 +36,9 @@ from knowflow.knowledge.answering.contracts import (
     RunFailedEvent,
     StageEvent,
 )
+from knowflow.knowledge.answering.coverage import aggregate_coverage
+from knowflow.knowledge.answering.evidence_budget import EvidenceBudget, allocate_evidence
+from knowflow.knowledge.answering.finalizer import AnsweringFinalizer
 from knowflow.knowledge.answering.models import (
     AgentRun,
     AgentRunStage,
@@ -46,18 +50,35 @@ from knowflow.knowledge.answering.models import (
     StageName,
     StageStatus,
 )
+from knowflow.knowledge.answering.observation_projection import SafeObservationProjector
+from knowflow.knowledge.answering.outcomes import (
+    AnsweringOutcome,
+    LimitCompliance,
+    SubquestionOutcome,
+)
 from knowflow.knowledge.answering.policy import RunPolicy
-from knowflow.knowledge.answering.retrieval import AttachmentRetrieval, Evidence, RetrievalError
+from knowflow.knowledge.answering.retrieval import (
+    AttachmentRetrieval,
+    Evidence,
+    EvidenceTokenizerV1,
+    RetrievalError,
+)
+from knowflow.knowledge.answering.subquestion_runner import (
+    SubquestionAnswer,
+    SubquestionRunner,
+)
 from knowflow.knowledge.answering.trace import (
     RunTraceV1,
-    TraceRetrieval,
     TraceRetry,
     TraceStageTiming,
-    TraceTermination,
     TraceTiming,
     TraceUsage,
     TraceUsageCall,
     TraceVersions,
+)
+from knowflow.knowledge.answering.trace_projection import (
+    TraceProjectionMetadata,
+    TraceProjector,
 )
 from knowflow.knowledge.conversations.models import Conversation
 from knowflow.knowledge.conversations.service import allowed_source_scope
@@ -78,11 +99,13 @@ class RetrievalPlan(BaseModel):
     queries: list[str]
 
 
-class VerificationDecision(BaseModel):
+class AnswerDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    coverage: Literal["FULL", "NONE"]
-    missing_facts: list[str]
+    status: Literal["ANSWERED", "INSUFFICIENT"]
+    answer: str = ""
+    labels: list[str] = Field(default_factory=list)
+    missing_facts: list[str] = Field(default_factory=list)
 
 
 class RunExecutionError(RuntimeError):
@@ -106,6 +129,12 @@ class RunExecutionContext:
     evidence: list[Evidence] = field(default_factory=lambda: [])
     evidence_token_count: int = 0
     citations: list[dict[str, object]] = field(default_factory=lambda: [])
+    subquestions: list[SubquestionOutcome] = field(default_factory=lambda: [])
+    candidate_sets: list[list[Evidence]] = field(default_factory=lambda: [])
+    actual_queries: int = 0
+    duplicate_evidence_count: int = 0
+    source_scope_compliant: bool | None = None
+    defer_retrieval_publish: bool = False
 
     @property
     def answer(self) -> str:
@@ -131,6 +160,46 @@ class RunExecutionContext:
                 completion_tokens=usage.completion_tokens,
                 total_tokens=usage.total_tokens,
             )
+        )
+
+    def outcome(self) -> AnsweringOutcome:
+        retrieval_round_count = max(
+            (item.retrieval_round_count for item in self.subquestions), default=0
+        )
+        budget_ok = (
+            len(self.evidence) <= self.policy.limits.max_evidence_chunks
+            and self.evidence_token_count <= self.policy.limits.max_evidence_tokens
+            and all(
+                len(item.evidence) <= self.policy.limits.max_subquestion_evidence_chunks
+                and sum(EvidenceTokenizerV1.count(value.text) for value in item.evidence)
+                <= self.policy.limits.max_subquestion_evidence_tokens
+                for item in self.subquestions
+            )
+        )
+        return AnsweringOutcome(
+            run_status=(
+                "PARTIAL" if any(item.failure_code for item in self.subquestions) else "SUCCEEDED"
+            ),
+            route=self.route.value if self.route is not None else "GENERAL",
+            subquestions=list(self.subquestions),
+            citations=list(self.citations),
+            failure_code=None,
+            limit_compliance=LimitCompliance(
+                run=(
+                    len(self.subquestions) <= self.policy.limits.max_subquestions
+                    and retrieval_round_count <= self.policy.limits.max_retrieval_rounds
+                    and self.actual_queries <= self.policy.limits.max_actual_queries
+                ),
+                visible_characters=len(self.answer) <= self.policy.limits.max_visible_characters,
+                budget=budget_ok,
+                source_scope=self.source_scope_compliant,
+            ),
+            answer=self.answer,
+            query_count=self.actual_queries,
+            retrieval_round_count=retrieval_round_count,
+            duplicate_chunk_count=self.duplicate_evidence_count,
+            source_type_count=len({item.source_type for item in self.evidence}),
+            selected_evidence_token_count=self.evidence_token_count,
         )
 
 
@@ -312,6 +381,7 @@ class AnsweringService:
         except TimeoutError:
             if context.terminal_committed:
                 return
+            self._discard_unpublished_retrieval(context)
             await self._fail_current_stage(context)
             await self._converge_failure(
                 run_id,
@@ -320,10 +390,17 @@ class AnsweringService:
                 "RUN_LIMIT_EXCEEDED",
             )
             context.terminal_committed = True
-            yield self._failed_event(request_id, run_id, assistant_message_id, "RUN_LIMIT_EXCEEDED")
+            yield self._failed_event(
+                request_id,
+                run_id,
+                assistant_message_id,
+                "RUN_LIMIT_EXCEEDED",
+                observation=self._safe_observation(context, "RUN_LIMIT_EXCEEDED"),
+            )
         except RunExecutionError as exc:
             if context.terminal_committed:
                 return
+            self._discard_unpublished_retrieval(context)
             await self._fail_current_stage(context)
             await self._converge_failure(
                 run_id,
@@ -332,7 +409,13 @@ class AnsweringService:
                 exc.error_code,
             )
             context.terminal_committed = True
-            yield self._failed_event(request_id, run_id, assistant_message_id, exc.error_code)
+            yield self._failed_event(
+                request_id,
+                run_id,
+                assistant_message_id,
+                exc.error_code,
+                observation=self._safe_observation(context, exc.error_code),
+            )
         except (asyncio.CancelledError, GeneratorExit):
             if not context.terminal_committed:
                 self._schedule_interruption(run_id, assistant_message_id, context)
@@ -340,6 +423,7 @@ class AnsweringService:
         except Exception:
             if context.terminal_committed:
                 return
+            self._discard_unpublished_retrieval(context)
             await self._fail_current_stage(context)
             await self._converge_failure(
                 run_id,
@@ -348,7 +432,13 @@ class AnsweringService:
                 "INTERNAL_ERROR",
             )
             context.terminal_committed = True
-            yield self._failed_event(request_id, run_id, assistant_message_id, "INTERNAL_ERROR")
+            yield self._failed_event(
+                request_id,
+                run_id,
+                assistant_message_id,
+                "INTERNAL_ERROR",
+                observation=self._safe_observation(context, "INTERNAL_ERROR"),
+            )
 
     async def _execute(
         self,
@@ -361,6 +451,7 @@ class AnsweringService:
         content: str,
         context: RunExecutionContext,
     ) -> AsyncIterator[AnsweringEvent]:
+        pending_retrieval_delta: str | None = None
         await self._enter_stage(run_id, StageName.UNDERSTAND, context)
         yield StageEvent("stage.started", request_id, run_id, StageName.UNDERSTAND.value)
 
@@ -379,7 +470,9 @@ class AnsweringService:
 
         if decision.route is AnswerRoute.RETRIEVAL:
             source_filenames = await self._source_filenames(run_id)
+            context.source_scope_compliant = True
             if source_filenames:
+                context.defer_retrieval_publish = True
                 await self._enter_stage(run_id, StageName.PLAN, context)
                 yield StageEvent("stage.started", request_id, run_id, StageName.PLAN.value)
                 plan = await self._plan(prepared, decision, context)
@@ -390,12 +483,27 @@ class AnsweringService:
 
                 await self._enter_stage(run_id, StageName.RETRIEVE_1, context)
                 yield StageEvent("stage.started", request_id, run_id, StageName.RETRIEVE_1.value)
-                context.evidence = await self._retrieve(plan, source_filenames, context)
-                context.evidence, context.evidence_token_count = self._retrieval.select(
-                    context.evidence,
-                    max_chunks=self._policy.limits.max_evidence_chunks,
-                    max_tokens=self._policy.limits.max_evidence_tokens,
+                runner = SubquestionRunner(
+                    lambda query: self._retrieve_query(query, source_filenames, context),
+                    lambda query, evidence: self._answer_subquestion(
+                        prepared, query, evidence, context
+                    ),
                 )
+                context.subquestions = []
+                context.candidate_sets = []
+                for query in plan.queries:
+                    try:
+                        retrieved = await runner.retrieve(query)
+                    except RunExecutionError as exc:
+                        failed = runner.new_outcome(query)
+                        failed.status = "FAILED"
+                        failed.failure_code = exc.error_code
+                        context.subquestions.append(failed)
+                        context.candidate_sets.append([])
+                    else:
+                        context.subquestions.append(retrieved.outcome)
+                        context.candidate_sets.append(retrieved.candidates)
+                self._allocate_evidence(context)
                 await self._complete_stage(context.current_stage_id)
                 context.current_stage_id = None
                 context.current_stage = None
@@ -403,8 +511,19 @@ class AnsweringService:
 
                 await self._enter_stage(run_id, StageName.VERIFY, context)
                 yield StageEvent("stage.started", request_id, run_id, StageName.VERIFY.value)
-                verification = await self._verify(plan, context.evidence, context)
-                context.coverage = verification.coverage
+                for state in context.subquestions:
+                    state.verify_input_page_hashes = {
+                        hashlib.sha256(f"{item.source_id}:{page}".encode()).hexdigest()
+                        for item in state.evidence
+                        for page in item.pages
+                    }
+                    if not state.evidence:
+                        state.status = "INSUFFICIENT"
+                        state.missing_facts = ["足以回答该问题的 PDF 证据"]
+                    elif not self._valid_evidence(state.evidence, source_filenames, context):
+                        state.status = "FAILED"
+                        state.failure_code = "SOURCE_SCOPE_VIOLATION"
+                context.coverage = aggregate_coverage(context.subquestions)
                 await self._complete_stage(context.current_stage_id)
                 context.current_stage_id = None
                 context.current_stage = None
@@ -413,23 +532,70 @@ class AnsweringService:
                 await self._enter_stage(run_id, StageName.GENERATE, context)
                 yield StageEvent("stage.started", request_id, run_id, StageName.GENERATE.value)
                 try:
-                    if verification.coverage == "FULL":
-                        context.citations = self._citations(context.evidence)
-                        async for delta in self._generate_grounded(
-                            prepared, content, decision, context.evidence, context
-                        ):
-                            visible, exceeded = self._append_visible_delta(context, delta)
-                            if visible:
-                                yield AnswerDeltaEvent("answer.delta", request_id, run_id, visible)
-                            if exceeded:
-                                raise RunExecutionError("RUN_LIMIT_EXCEEDED")
-                    else:
-                        refusal = "当前证据不足，无法可靠回答该问题。请补充包含相关事实的 PDF。"
-                        visible, exceeded = self._append_visible_delta(context, refusal)
-                        if visible:
-                            yield AnswerDeltaEvent("answer.delta", request_id, run_id, visible)
-                        if exceeded:
-                            raise RunExecutionError("RUN_LIMIT_EXCEEDED")
+                    context.evidence = self._unique_evidence(context.subquestions)
+                    context.evidence_token_count = sum(
+                        self._token_count(item) for item in context.evidence
+                    )
+                    generated: list[tuple[str, list[Evidence]] | None] = []
+                    for state in context.subquestions:
+                        if state.status == "FAILED":
+                            generated.append(None)
+                            continue
+                        try:
+                            used_evidence = await runner.answer(state)
+                        except RunExecutionError as exc:
+                            state.status = "FAILED"
+                            state.failure_code = exc.error_code
+                            state.answer_executed = False
+                            generated.append(None)
+                            continue
+                        generated.append(
+                            (state.answer or "", used_evidence)
+                            if used_evidence is not None and state.status == "ANSWERED"
+                            else None
+                        )
+                    if context.subquestions and all(
+                        state.status == "FAILED" for state in context.subquestions
+                    ):
+                        raise RunExecutionError(
+                            next(
+                                (
+                                    state.failure_code
+                                    for state in context.subquestions
+                                    if state.failure_code
+                                ),
+                                "MODEL_FAILED",
+                            )
+                        )
+                    answer_evidence = [
+                        item
+                        for result in generated
+                        if result is not None
+                        for item in result[1]
+                    ]
+                    context.citations = self._citations(answer_evidence)
+                    fragments: list[str] = []
+                    for state, result in zip(context.subquestions, generated, strict=True):
+                        if result is not None:
+                            fragment, used_evidence = result
+                            state.citations = [
+                                citation
+                                for citation in context.citations
+                                if citation.get("source_id")
+                                in {item.source_id for item in used_evidence}
+                            ]
+                            fragments.append(
+                                fragment + self._citation_markers(used_evidence, context.citations)
+                            )
+                        else:
+                            missing = self._missing_facts(state.missing_facts)
+                            fragments.append(f"未能确认相关内容；尚缺少：{missing}。")
+                    answer = "\n\n".join(fragments)
+                    context.coverage = aggregate_coverage(context.subquestions)
+                    visible, exceeded = self._append_visible_delta(context, answer)
+                    pending_retrieval_delta = visible
+                    if exceeded:
+                        raise RunExecutionError("RUN_LIMIT_EXCEEDED")
                     await self._complete_stage(context.current_stage_id)
                 except ChatError as exc:
                     raise RunExecutionError("MODEL_FAILED") from exc
@@ -437,13 +603,13 @@ class AnsweringService:
                 context.current_stage = None
                 yield StageEvent("stage.completed", request_id, run_id, StageName.GENERATE.value)
             else:
+                context.defer_retrieval_publish = True
                 await self._enter_stage(run_id, StageName.GENERATE, context)
                 yield StageEvent("stage.started", request_id, run_id, StageName.GENERATE.value)
                 context.coverage = "NONE"
                 refusal = "当前没有可用资料。请上传附件或开启并选择知识源后再试。"
                 visible, exceeded = self._append_visible_delta(context, refusal)
-                if visible:
-                    yield AnswerDeltaEvent("answer.delta", request_id, run_id, visible)
+                pending_retrieval_delta = visible
                 if exceeded:
                     raise RunExecutionError("RUN_LIMIT_EXCEEDED")
                 await self._complete_stage(context.current_stage_id)
@@ -476,6 +642,7 @@ class AnsweringService:
                 context=context,
             )
         except Exception:
+            self._discard_unpublished_retrieval(context)
             await self._converge_failure(
                 run_id,
                 assistant_message_id,
@@ -483,10 +650,24 @@ class AnsweringService:
                 "INTERNAL_ERROR",
             )
             context.terminal_committed = True
-            yield self._failed_event(request_id, run_id, assistant_message_id, "INTERNAL_ERROR")
+            yield self._failed_event(
+                request_id,
+                run_id,
+                assistant_message_id,
+                "INTERNAL_ERROR",
+                observation=self._safe_observation(context, "INTERNAL_ERROR"),
+            )
             return
         context.terminal_committed = True
-        yield RunCompletedEvent("run.completed", request_id, run_id, assistant_message_id)
+        if pending_retrieval_delta:
+            yield AnswerDeltaEvent("answer.delta", request_id, run_id, pending_retrieval_delta)
+        yield RunCompletedEvent(
+            "run.completed",
+            request_id,
+            run_id,
+            assistant_message_id,
+            observation=self._safe_observation(context, None),
+        )
 
     async def _source_filenames(self, run_id: str) -> dict[str, str]:
         async with self._sessions() as session:
@@ -516,7 +697,9 @@ class AnsweringService:
     ) -> RetrievalPlan:
         messages = [
             ChatMessage(
-                "system", "为独立 PDF 问题生成一个检索查询。只返回 JSON：{\"queries\":[\"...\"]}。"
+                "system",
+                "简单问题只生成一个独立检索查询；仅在用户明确包含多个意图时按原顺序拆分，"
+                '最多五个。只返回 JSON：{"queries":["..."]}。',
             ),
             *prepared.chat_messages(decision.standalone_question),
         ]
@@ -530,20 +713,22 @@ class AnsweringService:
                 queries = [query.strip() for query in plan.queries if query.strip()]
                 if not queries:
                     raise ValidationError.from_exception_data("RetrievalPlan", [])
-                return RetrievalPlan(queries=queries[:1])
+                return RetrievalPlan(queries=queries[: context.policy.limits.max_subquestions])
             except (ValidationError, ChatError) as exc:
                 retryable = isinstance(exc, ValidationError) or exc.retryable
                 if retryable and context.consume_retry():
                     continue
                 raise RunExecutionError("MODEL_FAILED") from exc
 
-    async def _retrieve(
+    async def _retrieve_query(
         self,
-        plan: RetrievalPlan,
+        query: str,
         source_filenames: dict[str, str],
         context: RunExecutionContext,
-    ) -> list[Evidence]:
-        query = plan.queries[0]
+    ) -> tuple[list[Evidence], int, int]:
+        if context.actual_queries >= context.policy.limits.max_actual_queries:
+            raise RunExecutionError("RUN_LIMIT_EXCEEDED")
+        context.actual_queries += 1
         while True:
             try:
                 vector = await self._retrieval.embed(
@@ -561,68 +746,118 @@ class AnsweringService:
             raise RunExecutionError("RETRIEVAL_FAILED") from exc
         while True:
             try:
-                return await self._retrieval.rerank(
+                reranked = await self._retrieval.rerank(
                     query, evidence, timeout_seconds=self._chat_timeout(context)
                 )
+                return reranked, len(evidence), len(reranked)
             except RetrievalError as exc:
                 if not (exc.retryable and context.consume_retry()):
                     raise RunExecutionError("RETRIEVAL_FAILED") from exc
 
-    async def _verify(
-        self, plan: RetrievalPlan, evidence: list[Evidence], context: RunExecutionContext
-    ) -> VerificationDecision:
-        evidence_text = "\n\n".join(
-            f"来源：{item.filename} 页码：{','.join(map(str, item.pages))}\n{item.text}"
-            for item in evidence
-        )
-        messages = [
-            ChatMessage(
-                "system",
-                "核验证据是否足以回答问题。只返回 JSON："
-                "{\"coverage\":\"FULL|NONE\",\"missing_facts\":[\"...\"]}。",
-            ),
-            ChatMessage("user", f"问题：{plan.queries[0]}\n证据：\n{evidence_text}"),
-        ]
-        while True:
-            try:
-                result = await self._chat.complete_json(
-                    messages, timeout_seconds=self._chat_timeout(context)
-                )
-                context.record_usage("VERIFY", result.usage)
-                return VerificationDecision.model_validate(result.payload)
-            except (ValidationError, ChatError) as exc:
-                retryable = isinstance(exc, ValidationError) or exc.retryable
-                if retryable and context.consume_retry():
-                    continue
-                raise RunExecutionError("MODEL_FAILED") from exc
-
-    async def _generate_grounded(
+    async def _answer_subquestion(
         self,
         prepared: PreparedContext,
-        content: str,
-        decision: RouteDecision,
+        query: str,
         evidence: list[Evidence],
         context: RunExecutionContext,
-    ) -> AsyncIterator[str]:
+    ) -> SubquestionAnswer:
         evidence_text = "\n\n".join(
-            f"{item.filename} 第 {','.join(map(str, item.pages))} 页：{item.text}"
-            for item in evidence
+            f"E{index + 1} {item.filename} 第 {','.join(map(str, item.pages))} 页：{item.text}"
+            for index, item in enumerate(evidence)
         )
         messages = [
-            ChatMessage("system", "只根据给定 PDF 证据回答，不补充通用知识，不输出引用标记。"),
-            *prepared.chat_messages(content),
             ChatMessage(
                 "system",
-                f"独立问题：{decision.standalone_question}\n证据：\n{evidence_text}",
+                "只根据给定 PDF 证据判断并回答，不补充通用知识，不输出引用标记。"
+                '只返回 JSON：{"status":"ANSWERED|INSUFFICIENT",'
+                '"answer":"...","labels":["E1"],"missing_facts":["..."]}。'
+                "证据不足时 status=INSUFFICIENT、answer 为空、labels 为空。",
             ),
+            *prepared.chat_messages(query),
+            ChatMessage("system", f"独立问题：{query}\n证据：\n{evidence_text}"),
         ]
-        async for event in self._chat.stream_text(
-            messages, timeout_seconds=self._chat_timeout(context)
+        try:
+            result = await self._chat.complete_json(
+                messages, timeout_seconds=self._chat_timeout(context)
+            )
+            context.record_usage("ANSWER", result.usage)
+            validated = AnswerDecision.model_validate(result.payload)
+            return SubquestionAnswer(
+                validated.status,
+                validated.answer,
+                validated.labels,
+                validated.missing_facts,
+            )
+        except (ValidationError, ChatError) as exc:
+            raise RunExecutionError("MODEL_FAILED") from exc
+
+    @staticmethod
+    def _token_count(item: Evidence) -> int:
+        from knowflow.knowledge.answering.retrieval import EvidenceTokenizerV1
+
+        return EvidenceTokenizerV1.count(item.text)
+
+    def _allocate_evidence(self, context: RunExecutionContext) -> None:
+        limits = self._policy.limits
+        allocation = allocate_evidence(
+            context.candidate_sets,
+            EvidenceBudget(
+                global_chunks=limits.max_evidence_chunks,
+                global_tokens=limits.max_evidence_tokens,
+                per_subquestion_chunks=limits.max_subquestion_evidence_chunks,
+                per_subquestion_tokens=limits.max_subquestion_evidence_tokens,
+            ),
+        )
+        for state, evidence in zip(context.subquestions, allocation.by_subquestion, strict=True):
+            state.evidence = evidence
+            state.selected_evidence_token_count = sum(
+                EvidenceTokenizerV1.count(item.text) for item in evidence
+            )
+        context.evidence = allocation.unique_evidence
+        context.evidence_token_count = allocation.total_tokens
+        context.duplicate_evidence_count = allocation.duplicate_chunk_count
+
+    @staticmethod
+    def _unique_evidence(states: list[SubquestionOutcome]) -> list[Evidence]:
+        result: list[Evidence] = []
+        seen: set[tuple[str, str]] = set()
+        for state in states:
+            for item in state.evidence:
+                key = (item.source_id, item.chunk_id)
+                if key not in seen:
+                    seen.add(key)
+                    result.append(item)
+        return result
+
+    @staticmethod
+    def _missing_facts(facts: list[str]) -> str:
+        facts = [fact.strip() for fact in facts if fact.strip()]
+        facts = list(dict.fromkeys(facts))[:3]
+        return "；".join(facts)[:300] or "足以回答该问题的具体事实"
+
+    @staticmethod
+    def _valid_evidence(
+        evidence: list[Evidence], source_filenames: dict[str, str], context: RunExecutionContext
+    ) -> bool:
+        if any(
+            not item.text.strip()
+            or item.source_id not in source_filenames
+            or not item.pages
+            for item in evidence
         ):
-            if isinstance(event, ChatStreamUsage):
-                context.record_usage("ANSWER", event.usage)
-            else:
-                yield event.delta
+            context.source_scope_compliant = False
+            return False
+        return True
+
+    @staticmethod
+    def _citation_markers(evidence: list[Evidence], citations: list[dict[str, object]]) -> str:
+        indexes: list[str] = []
+        for item in evidence:
+            for index, citation in enumerate(citations):
+                if citation.get("source_id") == item.source_id:
+                    indexes.append(str(index))
+                    break
+        return "".join(f"[[citation:{index}]]" for index in dict.fromkeys(indexes))
 
     @staticmethod
     def _citations(evidence: list[Evidence]) -> list[dict[str, object]]:
@@ -848,47 +1083,22 @@ class AnsweringService:
         context: RunExecutionContext,
     ) -> None:
         now = self._utc_now()
-        async with self._sessions() as session, session.begin():
-            conversation = await session.scalar(
-                select(Conversation).where(Conversation.id == conversation_id).with_for_update()
-            )
-            run = await session.get(AgentRun, run_id, with_for_update=True)
-            user_message = await session.get(Message, user_message_id)
-            assistant_message = await session.get(
-                Message, assistant_message_id, with_for_update=True
-            )
-            if (
-                conversation is None
-                or run is None
-                or user_message is None
-                or assistant_message is None
-            ):
+        async with self._sessions() as session:
+            run = await session.get(AgentRun, run_id)
+            if run is None:
                 raise RuntimeError("Answering terminal state is missing")
-            earlier_success = await session.scalar(
-                select(AgentRun.id)
-                .where(
-                    AgentRun.conversation_id == conversation_id,
-                    AgentRun.id != run_id,
-                    AgentRun.status == RunStatus.SUCCEEDED,
-                )
-                .limit(1)
-            )
-            run.status = RunStatus.SUCCEEDED
-            run.route = context.route
-            run.error_code = None
-            run.finished_at = now
-            run.trace_version = self._policy.trace_version
-            run.policy_version = self._policy.policy_version
-            run.trace_json = await self._terminal_trace(session, run, context, now, "SUCCEEDED")
-            assistant_message.content = context.answer
-            assistant_message.status = MessageStatus.COMPLETE
-            assistant_message.citations_json = context.citations
-            if earlier_success is None and conversation.title == "新会话":
-                conversation.title = user_message.content[:20]
-                conversation.updated_at = max(
-                    now,
-                    conversation.updated_at + timedelta(microseconds=1),
-                )
+            trace_json = await self._terminal_trace(session, run, context, now, "SUCCEEDED")
+        await AnsweringFinalizer(self._sessions).commit_success(
+            context.outcome(),
+            conversation_id=conversation_id,
+            run_id=run_id,
+            user_message_id=user_message_id,
+            assistant_message_id=assistant_message_id,
+            finished_at=now,
+            trace_json=trace_json,
+            trace_version=self._policy.trace_version,
+            policy_version=self._policy.policy_version,
+        )
 
     async def _converge_failure(
         self,
@@ -898,25 +1108,21 @@ class AnsweringService:
         error_code: str,
     ) -> None:
         now = self._utc_now()
-        async with self._sessions() as session, session.begin():
-            run = await session.get(AgentRun, run_id, with_for_update=True)
-            assistant_message = await session.get(
-                Message, assistant_message_id, with_for_update=True
-            )
-            if run is None or assistant_message is None:
+        async with self._sessions() as session:
+            run = await session.get(AgentRun, run_id)
+            if run is None:
                 raise RuntimeError("Answering failure state is missing")
-            if run.status != RunStatus.RUNNING:
-                return
-            run.status = RunStatus.FAILED
-            run.route = context.route
-            run.error_code = error_code
-            run.finished_at = now
-            run.trace_version = self._policy.trace_version
-            run.policy_version = self._policy.policy_version
-            run.trace_json = await self._terminal_trace(session, run, context, now, error_code)
-            assistant_message.content = context.answer
-            assistant_message.status = MessageStatus.PARTIAL
-            assistant_message.citations_json = []
+            trace_json = await self._terminal_trace(session, run, context, now, error_code)
+        await AnsweringFinalizer(self._sessions).commit_failure(
+            context.outcome(),
+            run_id=run_id,
+            assistant_message_id=assistant_message_id,
+            finished_at=now,
+            trace_json=trace_json,
+            trace_version=self._policy.trace_version,
+            policy_version=self._policy.policy_version,
+            error_code=error_code,
+        )
 
     def _schedule_interruption(
         self,
@@ -1063,31 +1269,41 @@ class AnsweringService:
         termination: str | None,
     ) -> RunTraceV1:
         calls = context.usage_calls
-        return RunTraceV1(
-            versions=TraceVersions(
-                trace_version=self._policy.trace_version,
-                policy_version=self._policy.policy_version,
+        return TraceProjector().project(
+            context.outcome(),
+            TraceProjectionMetadata(
+                versions=TraceVersions(
+                    trace_version=self._policy.trace_version,
+                    policy_version=self._policy.policy_version,
+                ),
+                usage=TraceUsage(
+                    calls=calls,
+                    request_count=len(calls),
+                    prompt_tokens=sum(call.prompt_tokens for call in calls),
+                    completion_tokens=sum(call.completion_tokens for call in calls),
+                    total_tokens=sum(call.total_tokens for call in calls),
+                ),
+                timing=TraceTiming(total_ms=total_ms, stages=stage_timings),
+                retry=TraceRetry(
+                    limit=self._policy.limits.max_retries,
+                    used=context.retries_used,
+                ),
+                termination=termination,
             ),
-            route=None if context.route is None else context.route.value,
-            coverage=context.coverage,
-            usage=TraceUsage(
-                calls=calls,
-                request_count=len(calls),
-                prompt_tokens=sum(call.prompt_tokens for call in calls),
-                completion_tokens=sum(call.completion_tokens for call in calls),
-                total_tokens=sum(call.total_tokens for call in calls),
-            ),
-            timing=TraceTiming(total_ms=total_ms, stages=stage_timings),
-            retry=TraceRetry(
-                limit=self._policy.limits.max_retries,
-                used=context.retries_used,
-            ),
-            retrieval=TraceRetrieval(
-                final_evidence_chunk_count=len(context.evidence),
-                final_evidence_token_count=context.evidence_token_count,
-            ),
-            termination=(None if termination is None else TraceTermination(reason=termination)),
         )
+
+    def _safe_observation(
+        self, context: RunExecutionContext, failure_code: str | None
+    ) -> dict[str, object]:
+        return SafeObservationProjector().project(
+            context.outcome(), failure_code=failure_code
+        )
+
+    @staticmethod
+    def _discard_unpublished_retrieval(context: RunExecutionContext) -> None:
+        if context.defer_retrieval_publish:
+            context.answer_parts.clear()
+            context.citations.clear()
 
     def _append_visible_delta(self, context: RunExecutionContext, delta: str) -> tuple[str, bool]:
         remaining = self._policy.limits.max_visible_characters - len(context.answer)
@@ -1134,6 +1350,7 @@ class AnsweringService:
         run_id: str,
         assistant_message_id: str,
         error_code: str,
+        observation: dict[str, object] | None = None,
     ) -> RunFailedEvent:
         messages = {
             "MODEL_FAILED": "回答生成失败",
@@ -1146,6 +1363,7 @@ class AnsweringService:
             run_id,
             assistant_message_id,
             {"code": error_code, "message": messages.get(error_code, "回答处理失败")},
+            observation=observation,
         )
 
     @staticmethod

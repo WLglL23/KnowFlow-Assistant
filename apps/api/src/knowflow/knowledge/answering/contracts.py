@@ -26,6 +26,9 @@ class RunCompletedEvent:
     request_id: str
     run_id: str
     assistant_message_id: str
+    # Safe diagnostics consumed by the in-process evaluator only. The API
+    # serializer deliberately omits this field from SSE payloads.
+    observation: dict[str, object] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +38,7 @@ class RunFailedEvent:
     run_id: str
     assistant_message_id: str
     error: dict[str, str]
+    observation: dict[str, object] | None = field(default=None, repr=False, compare=False)
 
 
 type AnsweringEvent = StageEvent | AnswerDeltaEvent | RunCompletedEvent | RunFailedEvent

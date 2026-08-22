@@ -237,14 +237,17 @@ class PublicationDocuments:
             headers["Authorization"] = (
                 f"Bearer {self._settings.embedding_api_key.get_secret_value()}"
             )
+        vectors: list[list[float]] = []
         async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.post(
-                f"{self._settings.embedding_base_url.rstrip('/')}/embeddings",
-                headers=headers,
-                json={"model": self._settings.embedding_model, "input": texts},
-            )
-            response.raise_for_status()
-            vectors = [item["embedding"] for item in response.json()["data"]]
+            for start in range(0, len(texts), 20):
+                batch = texts[start : start + 20]
+                response = await client.post(
+                    f"{self._settings.embedding_base_url.rstrip('/')}/embeddings",
+                    headers=headers,
+                    json={"model": self._settings.embedding_model, "input": batch},
+                )
+                response.raise_for_status()
+                vectors.extend(item["embedding"] for item in response.json()["data"])
         if len(vectors) != len(texts) or any(
             len(vector) != self._settings.embedding_dimensions for vector in vectors
         ):
