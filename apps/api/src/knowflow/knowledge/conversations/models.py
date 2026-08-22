@@ -36,3 +36,4 @@ class Conversation(Base):
     summary_through_message_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)

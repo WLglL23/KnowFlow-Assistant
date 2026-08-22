@@ -65,3 +65,11 @@ async def approve_submission(
 ) -> SubmissionResponse:
     require_admin(account)
     return await request.app.state.container.publication.approve(submission_id, account.id)
+
+
+@router.delete("/{submission_id}", status_code=204)
+async def delete_admin_submission(
+    submission_id: str, request: Request, account: CurrentAccount
+) -> None:
+    require_admin(account)
+    await request.app.state.container.submissions.delete_admin(submission_id)

@@ -53,3 +53,10 @@ async def update_conversation(
         knowledge_mode=payload.knowledge_mode,
         selected_source_ids=payload.selected_source_ids,
     )
+
+
+@router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_conversation(
+    conversation_id: str, request: Request, account: CurrentAccount
+) -> None:
+    await container_for(request).conversations.delete(conversation_id, account.id)

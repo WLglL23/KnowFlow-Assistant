@@ -52,3 +52,9 @@ async def update_source(
 ) -> KnowledgeSourceResponse:
     require_admin(account)
     return await request.app.state.container.publication.set_enabled(source_id, payload.enabled)
+
+
+@router.delete("/{source_id}", status_code=204)
+async def delete_source(source_id: str, request: Request, account: CurrentAccount) -> None:
+    require_admin(account)
+    await request.app.state.container.publication.delete_source(source_id)

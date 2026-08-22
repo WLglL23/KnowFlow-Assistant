@@ -18,6 +18,7 @@ from knowflow.app.errors import AppError
 from knowflow.knowledge.conversations.models import Conversation, KnowledgeMode
 from knowflow.knowledge.documents.models import (
     AttachmentStatus,
+    CleanupStatus,
     ConversationAttachment,
     ProcessingStage,
 )
@@ -112,6 +113,7 @@ class AttachmentDocuments:
                     .where(
                         Conversation.id == conversation_id,
                         Conversation.owner_account_id == owner_account_id,
+                        Conversation.deleted_at.is_(None),
                     )
                     .with_for_update()
                 )
@@ -121,6 +123,7 @@ class AttachmentDocuments:
                     select(ConversationAttachment).where(
                         ConversationAttachment.conversation_id == conversation_id,
                         ConversationAttachment.content_sha256 == digest,
+                        ConversationAttachment.deleted_at.is_(None),
                     )
                 )
                 selected_count = (
@@ -141,6 +144,7 @@ class AttachmentDocuments:
                                     AttachmentStatus.READY,
                                 ]
                             ),
+                            ConversationAttachment.deleted_at.is_(None),
                         )
                     )
                     if (active or 0) + selected_count >= 5:
@@ -189,6 +193,7 @@ class AttachmentDocuments:
                 attachment = await session.scalar(
                     select(ConversationAttachment).where(
                         ConversationAttachment.conversation_id == conversation_id,
+                        ConversationAttachment.deleted_at.is_(None),
                         ConversationAttachment.content_sha256 == digest,
                     )
                 )
@@ -213,7 +218,10 @@ class AttachmentDocuments:
             items = (
                 await session.scalars(
                     select(ConversationAttachment)
-                    .where(ConversationAttachment.conversation_id == conversation_id)
+                    .where(
+                        ConversationAttachment.conversation_id == conversation_id,
+                        ConversationAttachment.deleted_at.is_(None),
+                    )
                     .order_by(ConversationAttachment.created_at, ConversationAttachment.id)
                 )
             ).all()
@@ -228,11 +236,31 @@ class AttachmentDocuments:
                 select(ConversationAttachment).where(
                     ConversationAttachment.id == attachment_id,
                     ConversationAttachment.conversation_id == conversation_id,
+                    ConversationAttachment.deleted_at.is_(None),
                 )
             )
             if attachment is None:
                 raise AppError(404, "NOT_FOUND", "资源不存在")
             return AttachmentResponse.from_model(attachment)
+
+    async def delete(self, conversation_id: str, attachment_id: str, owner_account_id: str) -> None:
+        async with self._sessions() as session, session.begin():
+            await self._visible_conversation(session, conversation_id, owner_account_id)
+            attachment = await session.scalar(
+                select(ConversationAttachment)
+                .where(
+                    ConversationAttachment.id == attachment_id,
+                    ConversationAttachment.conversation_id == conversation_id,
+                )
+                .with_for_update()
+            )
+            if attachment is None:
+                raise AppError(404, "NOT_FOUND", "资源不存在")
+            if attachment.deleted_at is not None:
+                return
+            attachment.deleted_at = datetime.now(UTC).replace(tzinfo=None)
+            attachment.es_cleanup_status = CleanupStatus.PENDING
+            attachment.minio_cleanup_status = CleanupStatus.PENDING
 
     async def _visible_conversation(
         self, session: AsyncSession, conversation_id: str, owner: str
@@ -240,7 +268,9 @@ class AttachmentDocuments:
         if (
             await session.scalar(
                 select(Conversation.id).where(
-                    Conversation.id == conversation_id, Conversation.owner_account_id == owner
+                    Conversation.id == conversation_id,
+                    Conversation.owner_account_id == owner,
+                    Conversation.deleted_at.is_(None),
                 )
             )
             is None
@@ -267,6 +297,7 @@ class AttachmentDocuments:
                 .where(
                     ConversationAttachment.status == AttachmentStatus.QUEUED,
                     ConversationAttachment.processing_started_at.is_(None),
+                    ConversationAttachment.deleted_at.is_(None),
                 )
                 .order_by(ConversationAttachment.queued_at, ConversationAttachment.id)
                 .with_for_update(skip_locked=True)
@@ -286,7 +317,8 @@ class AttachmentDocuments:
         try:
             async with self._sessions() as session:
                 item = await session.get(ConversationAttachment, attachment_id)
-                assert item is not None
+                if item is None or item.deleted_at is not None:
+                    return
                 content = await self._objects.get(item.object_key)
                 digest = item.content_sha256
             document = await asyncio.to_thread(self._pdf.convert, item.filename, content)

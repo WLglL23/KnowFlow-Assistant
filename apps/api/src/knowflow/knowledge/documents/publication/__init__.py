@@ -56,7 +56,10 @@ class PublicationDocuments:
                 async with self._sessions() as session, session.begin():
                     submission = await session.scalar(
                         select(KnowledgeSubmission)
-                        .where(KnowledgeSubmission.id == submission_id)
+                        .where(
+                            KnowledgeSubmission.id == submission_id,
+                            KnowledgeSubmission.deleted_at.is_(None),
+                        )
                         .with_for_update()
                     )
                     if submission is None:
@@ -103,7 +106,8 @@ class PublicationDocuments:
             items = (
                 await session.scalars(
                     select(KnowledgeSubmission).where(
-                        KnowledgeSubmission.status == KnowledgeSubmissionStatus.PUBLISHED
+                        KnowledgeSubmission.status == KnowledgeSubmissionStatus.PUBLISHED,
+                        KnowledgeSubmission.deleted_at.is_(None),
                     )
                 )
             ).all()
@@ -119,6 +123,7 @@ class PublicationDocuments:
                     .where(
                         KnowledgeSubmission.status == KnowledgeSubmissionStatus.PUBLISHED,
                         KnowledgeSubmission.enabled.is_(True),
+                        KnowledgeSubmission.deleted_at.is_(None),
                     )
                     .order_by(KnowledgeSubmission.created_at, KnowledgeSubmission.id)
                 )
@@ -129,7 +134,12 @@ class PublicationDocuments:
 
     async def read_source_document(self, source_id: str) -> tuple[bytes, str]:
         async with self._sessions() as session:
-            source = await session.get(KnowledgeSubmission, source_id)
+            source = await session.scalar(
+                select(KnowledgeSubmission).where(
+                    KnowledgeSubmission.id == source_id,
+                    KnowledgeSubmission.deleted_at.is_(None),
+                )
+            )
             if source is None:
                 raise AppError(404, "NOT_FOUND", "资源不存在")
             if source.status != KnowledgeSubmissionStatus.PUBLISHED:
@@ -148,7 +158,10 @@ class PublicationDocuments:
         async with self._sessions() as session, session.begin():
             source = await session.scalar(
                 select(KnowledgeSubmission)
-                .where(KnowledgeSubmission.id == source_id)
+                .where(
+                    KnowledgeSubmission.id == source_id,
+                    KnowledgeSubmission.deleted_at.is_(None),
+                )
                 .with_for_update()
             )
             if source is None:
@@ -160,6 +173,24 @@ class PublicationDocuments:
                 source.disabled_at = None if enabled else datetime.now(UTC).replace(tzinfo=None)
             await session.flush()
             return KnowledgeSourceResponse.from_model(source)
+
+    async def delete_source(self, submission_id: str) -> None:
+        async with self._sessions() as session, session.begin():
+            source = await session.scalar(
+                select(KnowledgeSubmission)
+                .where(KnowledgeSubmission.id == submission_id)
+                .with_for_update()
+            )
+            if source is None:
+                raise AppError(404, "NOT_FOUND", "资源不存在")
+            if source.deleted_at is not None:
+                return
+            if source.status != KnowledgeSubmissionStatus.PUBLISHED:
+                raise AppError(409, "STATE_CONFLICT", "当前状态不允许此操作")
+            source.deleted_at = datetime.now(UTC).replace(tzinfo=None)
+            source.active_content_sha256 = None
+            source.es_cleanup_status = CleanupStatus.PENDING
+            source.minio_cleanup_status = CleanupStatus.PENDING
 
     async def _publish(self, submission_id: str) -> None:
         try:

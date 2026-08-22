@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from knowflow.app.config import Settings
 from knowflow.app.errors import AppError
 from knowflow.knowledge.documents.models import (
+    CleanupStatus,
     KnowledgeSubmission,
     KnowledgeSubmissionStatus,
 )
@@ -81,13 +82,17 @@ class SubmissionDocuments:
             created_at=now,
             reviewed_at=None,
             published_at=None,
+            deleted_at=None,
         )
         object_may_exist = False
         try:
             async with self._sessions() as session, session.begin():
                 active_id = await session.scalar(
                     select(KnowledgeSubmission.id)
-                    .where(KnowledgeSubmission.active_content_sha256 == digest)
+                    .where(
+                        KnowledgeSubmission.active_content_sha256 == digest,
+                        KnowledgeSubmission.deleted_at.is_(None),
+                    )
                     .limit(1)
                 )
                 if active_id is not None:
@@ -110,7 +115,10 @@ class SubmissionDocuments:
             items = (
                 await session.scalars(
                     select(KnowledgeSubmission)
-                    .where(KnowledgeSubmission.submitter_account_id == submitter_account_id)
+                    .where(
+                        KnowledgeSubmission.submitter_account_id == submitter_account_id,
+                        KnowledgeSubmission.deleted_at.is_(None),
+                    )
                     .order_by(
                         KnowledgeSubmission.created_at.desc(),
                         KnowledgeSubmission.id.desc(),
@@ -123,7 +131,7 @@ class SubmissionDocuments:
         async with self._sessions() as session:
             items = (
                 await session.scalars(
-                    select(KnowledgeSubmission)
+                    select(KnowledgeSubmission).where(KnowledgeSubmission.deleted_at.is_(None))
                     .order_by(
                         KnowledgeSubmission.created_at.desc(),
                         KnowledgeSubmission.id.desc(),
@@ -134,7 +142,12 @@ class SubmissionDocuments:
 
     async def read_pending_document(self, submission_id: str) -> tuple[bytes, str]:
         async with self._sessions() as session:
-            submission = await session.get(KnowledgeSubmission, submission_id)
+            submission = await session.scalar(
+                select(KnowledgeSubmission).where(
+                    KnowledgeSubmission.id == submission_id,
+                    KnowledgeSubmission.deleted_at.is_(None),
+                )
+            )
             if submission is None:
                 raise AppError(404, "NOT_FOUND", "资源不存在")
             if submission.status != KnowledgeSubmissionStatus.PENDING_REVIEW:
@@ -154,7 +167,10 @@ class SubmissionDocuments:
         async with self._sessions() as session, session.begin():
             submission = await session.scalar(
                 select(KnowledgeSubmission)
-                .where(KnowledgeSubmission.id == submission_id)
+                .where(
+                    KnowledgeSubmission.id == submission_id,
+                    KnowledgeSubmission.deleted_at.is_(None),
+                )
                 .with_for_update()
             )
             if submission is None:
@@ -169,6 +185,50 @@ class SubmissionDocuments:
             submission.reviewed_at = datetime.now(UTC).replace(tzinfo=None)
             await session.flush()
             return SubmissionResponse.from_model(submission)
+
+    async def delete(self, submission_id: str, owner_account_id: str) -> None:
+        async with self._sessions() as session, session.begin():
+            submission = await session.scalar(
+                select(KnowledgeSubmission)
+                .where(
+                    KnowledgeSubmission.id == submission_id,
+                    KnowledgeSubmission.submitter_account_id == owner_account_id,
+                )
+                .with_for_update()
+            )
+            if submission is None:
+                raise AppError(404, "NOT_FOUND", "资源不存在")
+            if submission.deleted_at is not None:
+                return
+            if submission.status == KnowledgeSubmissionStatus.PUBLISHING:
+                raise AppError(409, "STATE_CONFLICT", "当前状态不允许此操作")
+            if submission.status == KnowledgeSubmissionStatus.PUBLISHED:
+                raise AppError(404, "NOT_FOUND", "资源不存在")
+            submission.deleted_at = datetime.now(UTC).replace(tzinfo=None)
+            submission.es_cleanup_status = CleanupStatus.PENDING
+            submission.minio_cleanup_status = CleanupStatus.PENDING
+
+    async def delete_admin(self, submission_id: str) -> None:
+        async with self._sessions() as session, session.begin():
+            submission = await session.scalar(
+                select(KnowledgeSubmission)
+                .where(
+                    KnowledgeSubmission.id == submission_id,
+                )
+                .with_for_update()
+            )
+            if submission is None:
+                raise AppError(404, "NOT_FOUND", "资源不存在")
+            if submission.deleted_at is not None:
+                return
+            if submission.status in {
+                KnowledgeSubmissionStatus.PUBLISHING,
+                KnowledgeSubmissionStatus.PUBLISHED,
+            }:
+                raise AppError(409, "STATE_CONFLICT", "当前状态不允许此操作")
+            submission.deleted_at = datetime.now(UTC).replace(tzinfo=None)
+            submission.es_cleanup_status = CleanupStatus.PENDING
+            submission.minio_cleanup_status = CleanupStatus.PENDING
 
     async def _compensate_object(self, object_key: str) -> None:
         exception_type = "Exception"

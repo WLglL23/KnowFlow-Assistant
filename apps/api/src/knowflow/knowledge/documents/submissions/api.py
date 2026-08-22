@@ -41,3 +41,10 @@ async def create_submission(
 @router.get("/mine", response_model=SubmissionListResponse)
 async def list_my_submissions(request: Request, account: CurrentAccount) -> SubmissionListResponse:
     return await request.app.state.container.submissions.list_for_owner(account.id)
+
+
+@router.delete("/{submission_id}", status_code=204)
+async def delete_submission(
+    submission_id: str, request: Request, account: CurrentAccount
+) -> None:
+    await request.app.state.container.submissions.delete(submission_id, account.id)

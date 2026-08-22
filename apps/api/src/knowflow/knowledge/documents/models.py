@@ -68,6 +68,19 @@ class ConversationAttachment(Base):
     processed_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6))
     updated_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6))
+    deleted_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    es_cleanup_status: Mapped[CleanupStatus | None] = mapped_column(
+        Enum(CleanupStatus, native_enum=True), nullable=True
+    )
+    es_cleanup_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    es_cleanup_failed_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    minio_cleanup_status: Mapped[CleanupStatus | None] = mapped_column(
+        Enum(CleanupStatus, native_enum=True), nullable=True
+    )
+    minio_cleanup_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    minio_cleanup_failed_at: Mapped[datetime | None] = mapped_column(
+        DATETIME(fsp=6), nullable=True
+    )
 
 
 class KnowledgeSubmission(Base):
@@ -114,3 +127,4 @@ class KnowledgeSubmission(Base):
     created_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6))
     reviewed_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)

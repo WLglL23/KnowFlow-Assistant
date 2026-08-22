@@ -263,6 +263,7 @@ class AnsweringService:
                 .where(
                     Conversation.id == conversation_id,
                     Conversation.owner_account_id == actor_id,
+                    Conversation.deleted_at.is_(None),
                 )
                 .with_for_update()
             )

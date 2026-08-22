@@ -17,6 +17,7 @@ from knowflow.knowledge.conversations.schemas import (
 )
 from knowflow.knowledge.documents.models import (
     AttachmentStatus,
+    CleanupStatus,
     ConversationAttachment,
     KnowledgeSubmission,
     KnowledgeSubmissionStatus,
@@ -53,7 +54,10 @@ class ConversationService:
             conversations = (
                 await session.scalars(
                     select(Conversation)
-                    .where(Conversation.owner_account_id == owner_account_id)
+                    .where(
+                        Conversation.owner_account_id == owner_account_id,
+                        Conversation.deleted_at.is_(None),
+                    )
                     .order_by(Conversation.updated_at.desc(), Conversation.id.desc())
                 )
             ).all()
@@ -118,6 +122,7 @@ class ConversationService:
                     .where(
                         ConversationAttachment.conversation_id == conversation_id,
                         ConversationAttachment.status.in_(OCCUPYING_ATTACHMENT_STATUSES),
+                        ConversationAttachment.deleted_at.is_(None),
                     )
                 )
                 selected_count = (
@@ -159,6 +164,7 @@ class ConversationService:
                         KnowledgeSubmission.id.in_(selected_source_ids),
                         KnowledgeSubmission.status == KnowledgeSubmissionStatus.PUBLISHED,
                         KnowledgeSubmission.enabled.is_(True),
+                        KnowledgeSubmission.deleted_at.is_(None),
                     ).with_for_update()
                 )
             ).all()
@@ -177,6 +183,7 @@ class ConversationService:
         statement = select(Conversation).where(
             Conversation.id == conversation_id,
             Conversation.owner_account_id == owner_account_id,
+            Conversation.deleted_at.is_(None),
         )
         if for_update:
             statement = statement.with_for_update()
@@ -184,6 +191,35 @@ class ConversationService:
         if conversation is None:
             raise AppError(404, "NOT_FOUND", "资源不存在")
         return conversation
+
+    async def delete(self, conversation_id: str, owner_account_id: str) -> None:
+        async with self._sessions() as session, session.begin():
+            conversation = await session.scalar(
+                select(Conversation)
+                .where(
+                    Conversation.id == conversation_id,
+                    Conversation.owner_account_id == owner_account_id,
+                )
+                .with_for_update()
+            )
+            if conversation is None:
+                raise AppError(404, "NOT_FOUND", "资源不存在")
+            if conversation.deleted_at is not None:
+                return
+            now = self._utc_now()
+            conversation.deleted_at = now
+            attachments = (
+                await session.scalars(
+                    select(ConversationAttachment)
+                    .where(ConversationAttachment.conversation_id == conversation_id)
+                    .with_for_update()
+                )
+            ).all()
+            for attachment in attachments:
+                if attachment.deleted_at is None:
+                    attachment.deleted_at = now
+                    attachment.es_cleanup_status = CleanupStatus.PENDING
+                    attachment.minio_cleanup_status = CleanupStatus.PENDING
 
     @staticmethod
     def _utc_now() -> datetime:
@@ -201,6 +237,7 @@ async def allowed_source_scope(
                     ConversationAttachment.conversation_id == conversation.id,
                     ConversationAttachment.owner_account_id == conversation.owner_account_id,
                     ConversationAttachment.status == AttachmentStatus.READY,
+                    ConversationAttachment.deleted_at.is_(None),
                 )
                 .order_by(ConversationAttachment.created_at, ConversationAttachment.id)
             )
@@ -218,7 +255,8 @@ async def allowed_source_scope(
                 for item in (
                     await session.scalars(
                         select(KnowledgeSubmission).where(
-                            KnowledgeSubmission.id.in_(selected_ids)
+                            KnowledgeSubmission.id.in_(selected_ids),
+                            KnowledgeSubmission.deleted_at.is_(None),
                         ).with_for_update()
                     )
                 ).all()
@@ -232,6 +270,7 @@ async def allowed_source_scope(
                     .where(
                         KnowledgeSubmission.status == KnowledgeSubmissionStatus.PUBLISHED,
                         KnowledgeSubmission.enabled.is_(True),
+                        KnowledgeSubmission.deleted_at.is_(None),
                     )
                     .order_by(KnowledgeSubmission.created_at, KnowledgeSubmission.id)
                     .with_for_update()

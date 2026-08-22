@@ -55,3 +55,12 @@ async def attachment_detail(
     return await request.app.state.container.documents.detail(
         conversation_id, attachment_id, account.id
     )
+
+
+@router.delete("/{attachment_id}", status_code=204)
+async def delete_attachment(
+    conversation_id: str, attachment_id: str, request: Request, account: CurrentAccount
+) -> None:
+    await request.app.state.container.documents.delete(
+        conversation_id, attachment_id, account.id
+    )

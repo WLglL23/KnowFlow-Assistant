@@ -55,9 +55,20 @@ class CitationPreview:
                     ConversationAttachment.id == source_id,
                     ConversationAttachment.conversation_id == conversation.id,
                     ConversationAttachment.owner_account_id == actor_id,
+                    ConversationAttachment.deleted_at.is_(None),
                 )
             )
             if attachment is None:
+                tombstone = await session.scalar(
+                    select(ConversationAttachment.id).where(
+                        ConversationAttachment.id == source_id,
+                        ConversationAttachment.conversation_id == conversation.id,
+                        ConversationAttachment.owner_account_id == actor_id,
+                        ConversationAttachment.deleted_at.is_not(None),
+                    )
+                )
+                if tombstone is not None:
+                    raise AppError(410, "CITATION_SOURCE_DELETED", "引用来源已删除")
                 raise AppError(404, "NOT_FOUND", "资源不存在")
             object_key = attachment.object_key
             filename = attachment.filename
