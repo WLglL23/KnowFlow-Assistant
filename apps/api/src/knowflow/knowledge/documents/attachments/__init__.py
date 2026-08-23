@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -29,6 +30,8 @@ from knowflow.knowledge.documents.schemas import (
     AttachmentResponse,
     AttachmentUploadResponse,
 )
+
+logger = logging.getLogger("knowflow.documents.attachments")
 
 
 class AttachmentDocuments:
@@ -331,6 +334,10 @@ class AttachmentDocuments:
             await self._replace_index(attachment_id, digest, chunks, vectors)
             await self._finish(attachment_id, True)
         except Exception:
+            logger.exception(
+                "Attachment processing failed",
+                extra={"attachment_id": attachment_id},
+            )
             await self._finish(attachment_id, False)
 
     async def _progress(self, attachment_id: str, stage: ProcessingStage, value: int) -> None:
@@ -366,7 +373,7 @@ class AttachmentDocuments:
             if text and page_numbers:
                 chunks.append((page_numbers, text))
         if not chunks:
-            raise ValueError("Docling produced no chunk with page provenance")
+            raise ValueError("PAGE_NUMBERS_MISSING: Docling produced no chunk with page provenance")
         return chunks
 
     async def _embed(self, texts: list[str]) -> list[list[float]]:
