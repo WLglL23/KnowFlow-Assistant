@@ -82,12 +82,14 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     },
   });
   if (!response.ok) return parseError(response);
+  if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }
 
 export const listConversations = () => request<ConversationList>("/api/conversations");
 export const createConversation = () => request<Conversation>("/api/conversations", { method: "POST" });
 export const getConversation = (id: string) => request<ConversationDetail>(`/api/conversations/${id}`);
+export const deleteConversation = (id: string) => request<void>(`/api/conversations/${id}`, { method: "DELETE" });
 export const renameConversation = (id: string, title: string) =>
   request<Conversation>(`/api/conversations/${id}`, { method: "PATCH", body: JSON.stringify({ title }) });
 export const updateKnowledgeScope = (
@@ -100,6 +102,8 @@ export const updateKnowledgeScope = (
 });
 export const listAttachments = (conversationId: string) =>
   request<AttachmentList>(`/api/conversations/${conversationId}/attachments`);
+export const deleteAttachment = (conversationId: string, attachmentId: string) =>
+  request<void>(`/api/conversations/${conversationId}/attachments/${attachmentId}`, { method: "DELETE" });
 export const uploadAttachment = (conversationId: string, file: File) => {
   const body = new FormData();
   body.append("file", file);

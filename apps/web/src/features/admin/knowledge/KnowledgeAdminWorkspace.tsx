@@ -10,6 +10,8 @@ import {
   Library,
   LoaderCircle,
   RefreshCw,
+  RotateCcw,
+  Trash2,
   X,
   XCircle,
 } from "lucide-react";
@@ -17,20 +19,26 @@ import { useEffect, useMemo, useState } from "react";
 
 import {
   approveSubmission,
+  deleteKnowledgeSource,
   downloadSourceDocument,
   downloadSubmissionDocument,
   listAdminSubmissions,
+  listCleanupFailures,
   listKnowledgeSources,
   rejectSubmission,
   setKnowledgeSourceEnabled,
+  retryCleanup,
+  type CleanupFailure,
   type KnowledgeSource,
 } from "../../../api/adminKnowledge";
 import { ApiError } from "../../../api/auth";
 import type { Submission, SubmissionStatus } from "../../../api/submissions";
+import { ConfirmDialog } from "../../shared/ConfirmDialog";
 
-type AdminTab = "review" | "sources" | "history";
+type AdminTab = "review" | "sources" | "history" | "cleanup";
 const submissionsKey = ["admin", "knowledge", "submissions"] as const;
 const sourcesKey = ["admin", "knowledge", "sources"] as const;
+const cleanupKey = ["admin", "cleanup-failures"] as const;
 
 const statusCopy: Record<SubmissionStatus, { label: string; detail: string }> = {
   PENDING_REVIEW: { label: "待审核", detail: "等待管理员处理" },
@@ -102,6 +110,7 @@ export function KnowledgeAdminWorkspace() {
   const client = useQueryClient();
   const [tab, setTab] = useState<AdminTab>("review");
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<KnowledgeSource | null>(null);
   const submissions = useQuery({
     queryKey: submissionsKey,
     queryFn: listAdminSubmissions,
@@ -109,6 +118,7 @@ export function KnowledgeAdminWorkspace() {
       query.state.data?.items.some((item) => item.status === "PUBLISHING") ? 2000 : false,
   });
   const sources = useQuery({ queryKey: sourcesKey, queryFn: listKnowledgeSources });
+  const cleanup = useQuery({ queryKey: cleanupKey, queryFn: listCleanupFailures, enabled: tab === "cleanup" });
 
   const pending = useMemo(
     () => submissions.data?.items.filter((item) => item.status === "PENDING_REVIEW") ?? [],
@@ -161,6 +171,31 @@ export function KnowledgeAdminWorkspace() {
     },
   });
 
+  const removeSource = useMutation({
+    mutationFn: (source: KnowledgeSource) => deleteKnowledgeSource(source.id),
+    onSuccess: async () => {
+      setDeleteTarget(null);
+      setFeedback("知识源已删除");
+      await Promise.all([
+        client.invalidateQueries({ queryKey: sourcesKey }),
+        client.invalidateQueries({ queryKey: cleanupKey }),
+      ]);
+    },
+    onError: (error) => setFeedback(adminError(error)),
+  });
+
+  const retry = useMutation({
+    mutationFn: (item: CleanupFailure) => retryCleanup(item.resource_type, item.resource_id),
+    onSuccess: async () => {
+      setFeedback("清理已重新开始");
+      await client.invalidateQueries({ queryKey: cleanupKey });
+    },
+    onError: async (error) => {
+      setFeedback(adminError(error));
+      await client.invalidateQueries({ queryKey: cleanupKey });
+    },
+  });
+
   const documentDownload = useMutation({
     mutationFn: ({ kind, id, filename }: { kind: "submission" | "source"; id: string; filename: string }) =>
       kind === "submission"
@@ -183,11 +218,11 @@ export function KnowledgeAdminWorkspace() {
           className="icon-button"
           type="button"
           onClick={() => void refreshAll()}
-          disabled={submissions.isFetching || sources.isFetching}
+          disabled={submissions.isFetching || sources.isFetching || cleanup.isFetching}
           aria-label="刷新 Knowledge 管理数据"
           title="刷新"
         >
-          <RefreshCw className={submissions.isFetching || sources.isFetching ? "spin" : ""} size={17} />
+          <RefreshCw className={submissions.isFetching || sources.isFetching || cleanup.isFetching ? "spin" : ""} size={17} />
         </button>
       </header>
 
@@ -201,6 +236,9 @@ export function KnowledgeAdminWorkspace() {
         <button type="button" className={tab === "history" ? "active" : ""} onClick={() => setTab("history")} aria-current={tab === "history" ? "page" : undefined}>
           <History size={16} />历史记录<span>{history.length}</span>
         </button>
+        <button type="button" className={tab === "cleanup" ? "active" : ""} onClick={() => setTab("cleanup")} aria-current={tab === "cleanup" ? "page" : undefined}>
+          <RotateCcw size={16} />清理失败<span>{cleanup.data?.items.length ?? 0}</span>
+        </button>
       </nav>
 
       {feedback && <div className="admin-feedback" role="status"><AlertCircle size={16} />{feedback}</div>}
@@ -210,6 +248,8 @@ export function KnowledgeAdminWorkspace() {
         {tab !== "sources" && submissions.isError && <AdminState error label={adminError(submissions.error)} onRetry={() => void submissions.refetch()} />}
         {tab === "sources" && sources.isPending && <AdminState loading label="正在加载知识源…" />}
         {tab === "sources" && sources.isError && <AdminState error label={adminError(sources.error)} onRetry={() => void sources.refetch()} />}
+        {tab === "cleanup" && cleanup.isPending && <AdminState loading label="正在加载清理状态…" />}
+        {tab === "cleanup" && cleanup.isError && <AdminState error label={adminError(cleanup.error)} onRetry={() => void cleanup.refetch()} />}
 
         {tab === "review" && submissions.data && (
           pending.length === 0 ? <AdminState label="当前没有待审核投稿" /> :
@@ -235,7 +275,7 @@ export function KnowledgeAdminWorkspace() {
           <div className="admin-records" role="table" aria-label="已发布知识源">
             <div className="admin-record-header source" role="row"><span>文档</span><span>状态</span><span>启用</span><span>操作</span></div>
             {sources.data.items.map((source) => (
-              <SourceRow key={source.id} source={source} busy={busySourceId !== null} onToggle={(enabled) => toggle.mutate({ id: source.id, enabled })} onDownload={() => documentDownload.mutate({ kind: "source", id: source.id, filename: source.filename })} />
+              <SourceRow key={source.id} source={source} busy={busySourceId !== null || removeSource.isPending} onToggle={(enabled) => toggle.mutate({ id: source.id, enabled })} onDownload={() => documentDownload.mutate({ kind: "source", id: source.id, filename: source.filename })} onDelete={() => setDeleteTarget(source)} />
             ))}
           </div>
         )}
@@ -254,12 +294,21 @@ export function KnowledgeAdminWorkspace() {
             ))}
           </div>
         )}
+
+        {tab === "cleanup" && cleanup.data && (
+          cleanup.data.items.length === 0 ? <AdminState label="当前没有待处理的清理失败" /> :
+          <div className="admin-records cleanup-records" role="table" aria-label="清理失败记录">
+            <div className="admin-record-header cleanup" role="row"><span>资源</span><span>步骤</span><span>状态</span><span>操作</span></div>
+            {cleanup.data.items.map((item) => <CleanupRow key={`${item.resource_type}-${item.resource_id}-${item.step}`} item={item} busy={retry.isPending} onRetry={() => retry.mutate(item)} />)}
+          </div>
+        )}
       </div>
+      {deleteTarget && <ConfirmDialog title="删除这个知识源？" description={`“${deleteTarget.filename}”会立即从知识库隐藏。历史消息仍保留，但引用预览会显示“来源已删除”。`} busy={removeSource.isPending} onCancel={() => setDeleteTarget(null)} onConfirm={() => removeSource.mutate(deleteTarget)} />}
     </section>
   );
 }
 
-function SourceRow({ source, busy, onToggle, onDownload }: { source: KnowledgeSource; busy: boolean; onToggle: (enabled: boolean) => void; onDownload: () => void }) {
+function SourceRow({ source, busy, onToggle, onDownload, onDelete }: { source: KnowledgeSource; busy: boolean; onToggle: (enabled: boolean) => void; onDownload: () => void; onDelete: () => void }) {
   return (
     <div className="admin-record source" role="row">
       <div className="admin-document-cell">
@@ -268,9 +317,19 @@ function SourceRow({ source, busy, onToggle, onDownload }: { source: KnowledgeSo
       </div>
       <div className="admin-status published"><span><CheckCircle2 size={16} />已发布</span><small>{source.enabled ? "可用于未来来源" : "当前已停用"}</small></div>
       <button className={`source-switch ${source.enabled ? "enabled" : ""}`} type="button" role="switch" aria-checked={source.enabled} aria-label={`${source.enabled ? "停用" : "启用"} ${source.filename}`} title={source.enabled ? "停用" : "启用"} disabled={busy} onClick={() => onToggle(!source.enabled)}><span /></button>
-      <div className="admin-actions"><button className="icon-button" type="button" onClick={onDownload} aria-label={`下载 ${source.filename}`} title="下载 PDF"><Download size={16} /></button></div>
+      <div className="admin-actions"><button className="icon-button" type="button" onClick={onDownload} aria-label={`下载 ${source.filename}`} title="下载 PDF"><Download size={16} /></button><button className="icon-button danger-icon" type="button" onClick={onDelete} aria-label={`删除 ${source.filename}`} title="删除知识源"><Trash2 size={16} /></button></div>
     </div>
   );
+}
+
+function CleanupRow({ item, busy, onRetry }: { item: CleanupFailure; busy: boolean; onRetry: () => void }) {
+  const resourceLabel = item.resource_type === "ATTACHMENT" ? "会话附件" : "知识投稿";
+  return <div className="admin-record cleanup" role="row">
+    <div className="admin-document-cell"><span className="admin-document-icon" aria-hidden="true"><RotateCcw size={18} /></span><span><strong>{resourceLabel}</strong><small>{item.resource_id}</small></span></div>
+    <span className="cleanup-step">{item.step === "ES" ? "Elasticsearch" : "MinIO"}</span>
+    <div className={`admin-status cleanup-${item.status.toLowerCase()}`}><span>{item.status === "FAILED" ? <XCircle size={16} /> : <Clock3 size={16} />}{item.status === "FAILED" ? "失败" : "待处理"}</span><small>{item.error_code ?? "等待清理"}</small></div>
+    <div className="admin-actions"><button className="admin-action approve" type="button" onClick={onRetry} disabled={busy}><RotateCcw size={15} />重试</button></div>
+  </div>;
 }
 
 function AdminState({ label, loading = false, error = false, onRetry }: { label: string; loading?: boolean; error?: boolean; onRetry?: () => void }) {

@@ -1,14 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, LoaderCircle, Plus, Send } from "lucide-react";
+import { AlertCircle, LoaderCircle, Plus, Send, Trash2 } from "lucide-react";
 import { useRef, useState } from "react";
 
 import { ApiError } from "../../api/auth";
 import {
-  listAttachments,
+  deleteAttachment, listAttachments,
   uploadAttachment,
   type Attachment,
   type AttachmentUploadResult,
 } from "../../api/conversations";
+import { ConfirmDialog } from "../shared/ConfirmDialog";
 
 const resultLabels: Partial<Record<AttachmentUploadResult, string>> = {
   EXISTING_QUEUED: "相同附件正在等待处理",
@@ -63,6 +64,7 @@ export function ConversationComposer({
   const fileInput = useRef<HTMLInputElement>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Attachment | null>(null);
   const queryKey = ["attachments", accountId, conversationId] as const;
   const attachments = useQuery({
     queryKey,
@@ -85,6 +87,15 @@ export function ConversationComposer({
       await queryClient.invalidateQueries({ queryKey });
     },
   });
+  const remove = useMutation({
+    mutationFn: (attachment: Attachment) => deleteAttachment(conversationId as string, attachment.id),
+    onSuccess: async () => {
+      setDeleteTarget(null);
+      setError(null);
+      await queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (cause) => setError(attachmentError(cause)),
+  });
 
   function chooseFile(file: File | undefined) {
     if (!file || !conversationId) return;
@@ -106,6 +117,7 @@ export function ConversationComposer({
               <span className="attachment-inline-state">{state.label}</span>
               <span aria-hidden="true">·</span>
               <span className="attachment-inline-name">{attachment.filename}</span>
+              <button className="attachment-delete" type="button" onClick={() => setDeleteTarget(attachment)} disabled={remove.isPending} aria-label={`删除 ${attachment.filename}`} title="删除附件"><Trash2 size={12} /></button>
             </div>
           );
         })}
@@ -143,6 +155,7 @@ export function ConversationComposer({
         />
         <button className="send-button" type="button" onClick={onSend} disabled={streaming || !conversationId || !draft.trim()} aria-label="发送问题" title="发送"><Send size={18} /></button>
       </div>
+      {deleteTarget && <ConfirmDialog title="删除这份附件？" description={`“${deleteTarget.filename}”会立即从当前会话中隐藏。正在进行的回答会继续完成，历史引用会保留为“来源已删除”。`} busy={remove.isPending} onCancel={() => setDeleteTarget(null)} onConfirm={() => remove.mutate(deleteTarget)} />}
     </div>
   );
 }

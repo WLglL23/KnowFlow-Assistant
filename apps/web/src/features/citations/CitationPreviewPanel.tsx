@@ -42,7 +42,15 @@ export function CitationPreviewPanel({ selection, onClose }: { selection: Citati
       <div className="citation-pages-label"><FileText size={15} /><span>原文第 {selection.citation.pages.join("、")} 页</span></div>
       <div className="citation-document">
         {preview.isPending && <div className="citation-state">正在加载授权页…</div>}
-        {preview.isError && <div className="citation-state error" role="alert"><AlertCircle size={22} /><span>{previewError(preview.error)}</span><button type="button" onClick={() => void preview.refetch()}>重试</button></div>}
+        {preview.isError && (
+          <div className={`citation-state error ${preview.error instanceof ApiError && preview.error.code === "CITATION_SOURCE_DELETED" ? "deleted" : ""}`} role="alert">
+            <AlertCircle size={22} />
+            <strong>{previewError(preview.error)}</strong>
+            {preview.error instanceof ApiError && preview.error.code === "CITATION_SOURCE_DELETED"
+              ? <span>这条历史消息仍保留，但原始资料已按删除请求移除，无法继续预览。</span>
+              : <button type="button" onClick={() => void preview.refetch()}>重试</button>}
+          </div>
+        )}
         {objectUrl && (
           <Document file={objectUrl} onLoadSuccess={({ numPages }) => setPageCount(numPages)} loading={<div className="citation-state">正在解析引用页…</div>} error={<div className="citation-state error">引用页无法显示</div>}>
             {Array.from({ length: pageCount }, (_, index) => <Page key={index} pageNumber={index + 1} width={306} renderAnnotationLayer={false} renderTextLayer />)}

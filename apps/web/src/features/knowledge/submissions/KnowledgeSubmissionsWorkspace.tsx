@@ -8,17 +8,20 @@ import {
   RefreshCw,
   Send,
   ShieldCheck,
+  Trash2,
   Upload,
   XCircle,
 } from "lucide-react";
 import { type ChangeEvent, type FormEvent, useEffect, useRef, useState } from "react";
 
 import { ApiError, type Account } from "../../../api/auth";
+import { ConfirmDialog } from "../../shared/ConfirmDialog";
 import {
   listMySubmissions,
   type Submission,
   type SubmissionStatus,
   submitKnowledge,
+  deleteSubmission,
 } from "../../../api/submissions";
 
 const statusCopy: Record<SubmissionStatus, { label: string; detail: string }> = {
@@ -74,8 +77,9 @@ function StatusIcon({ status }: { status: SubmissionStatus }) {
   return <Clock3 size={17} />;
 }
 
-function SubmissionRow({ submission }: { submission: Submission }) {
+function SubmissionRow({ submission, onDelete }: { submission: Submission; onDelete: (submission: Submission) => void }) {
   const copy = statusCopy[submission.status];
+  const canDelete = submission.status === "PENDING_REVIEW" || submission.status === "REJECTED" || submission.status === "PUBLISH_FAILED";
   return (
     <li className="submission-row">
       <div className="submission-file-icon" aria-hidden="true"><FileText size={19} /></div>
@@ -90,6 +94,7 @@ function SubmissionRow({ submission }: { submission: Submission }) {
           ? submission.rejection_reason
           : copy.detail}</small>
       </div>
+      {canDelete && <button className="icon-button submission-delete" type="button" onClick={() => onDelete(submission)} aria-label={`删除 ${submission.filename}`} title="删除投稿"><Trash2 size={15} /></button>}
     </li>
   );
 }
@@ -99,6 +104,7 @@ export function KnowledgeSubmissionsWorkspace({ account, compact = false }: { ac
   const inputRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
   const [feedback, setFeedback] = useState<{ kind: "success" | "info" | "error"; text: string } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Submission | null>(null);
   const mineKey = ["knowledge", "submissions", "mine", account.id] as const;
   const mine = useQuery({ queryKey: mineKey, queryFn: listMySubmissions });
   const upload = useMutation({
@@ -112,6 +118,15 @@ export function KnowledgeSubmissionsWorkspace({ account, compact = false }: { ac
       await client.invalidateQueries({ queryKey: mineKey });
     },
     onError: (error) => setFeedback({ kind: "error", text: submissionError(error) }),
+  });
+  const remove = useMutation({
+    mutationFn: (submission: Submission) => deleteSubmission(submission.id),
+    onSuccess: async () => {
+      setDeleteTarget(null);
+      setFeedback({ kind: "success", text: "投稿已删除" });
+      await client.invalidateQueries({ queryKey: mineKey });
+    },
+    onError: () => setFeedback({ kind: "error", text: "投稿删除失败，请刷新后重试" }),
   });
 
   useEffect(() => {
@@ -191,9 +206,10 @@ export function KnowledgeSubmissionsWorkspace({ account, compact = false }: { ac
           {mine.isPending && <div className="submission-list-state"><LoaderCircle className="spin" size={22} />正在加载提交…</div>}
           {mine.isError && <div className="submission-list-state error" role="alert"><AlertCircle size={22} />列表暂时无法加载<button type="button" onClick={() => void mine.refetch()}>重试</button></div>}
           {mine.data?.items.length === 0 && <div className="submission-list-state"><FileText size={24} />还没有提交记录</div>}
-          {mine.data && mine.data.items.length > 0 && <ul className="submission-list">{mine.data.items.map((item) => <SubmissionRow key={item.id} submission={item} />)}</ul>}
+          {mine.data && mine.data.items.length > 0 && <ul className="submission-list">{mine.data.items.map((item) => <SubmissionRow key={item.id} submission={item} onDelete={setDeleteTarget} />)}</ul>}
         </section>
       </div>
+      {deleteTarget && <ConfirmDialog title="删除这条投稿？" description={`“${deleteTarget.filename}”会立即从你的投稿列表隐藏且不可恢复。已发布资料的历史引用仍会保留为“来源已删除”。`} busy={remove.isPending} onCancel={() => setDeleteTarget(null)} onConfirm={() => remove.mutate(deleteTarget)} />}
     </section>
   );
 }

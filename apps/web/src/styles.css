@@ -163,6 +163,9 @@ button:focus-visible, input:focus-visible { outline: 3px solid rgba(21, 87, 246,
 .citation-document canvas { max-width: 100%; height: auto !important; display: block; }
 .citation-state { min-height: 220px; display: grid; place-content: center; justify-items: center; gap: 10px; color: #7c899d; font-size: 12px; text-align: center; }
 .citation-state.error { color: #a84148; }
+.citation-state.deleted { max-width: 280px; padding: 24px; border: 1px solid #efd0d2; border-radius: 8px; background: #fff7f7; text-align: left; }
+.citation-state.deleted strong { color: #a33e46; font-size: 14px; }
+.citation-state.deleted span { color: #7d5660; font-size: 11px; line-height: 1.55; }
 .citation-state button { padding: 6px 9px; border: 1px solid #cbd9f5; border-radius: 6px; color: #1f57ba; background: #f2f6ff; font-size: 11px; }
 .spin { animation: spin 0.9s linear infinite; }
 
@@ -216,7 +219,7 @@ button:focus-visible, input:focus-visible { outline: 3px solid rgba(21, 87, 246,
 .knowledge-workspace.compact .submission-feedback { margin: 0 12px 12px; }
 .knowledge-workspace.compact .submission-list-section { min-height: 220px; max-height: 46%; }
 .knowledge-workspace.compact .submission-list-section .submission-section-heading { min-height: 52px; flex-basis: 52px; }
-.knowledge-workspace.compact .submission-row { min-height: 58px; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 7px; padding: 9px 11px; }
+.knowledge-workspace.compact .submission-row { min-height: 58px; grid-template-columns: 30px minmax(0, 1fr) auto 28px; gap: 7px; padding: 9px 11px; }
 .knowledge-workspace.compact .submission-file-icon { width: 28px; height: 28px; }
 .knowledge-workspace.compact .submission-file-icon svg { width: 15px; }
 .knowledge-workspace.compact .submission-row time, .knowledge-workspace.compact .submission-status small { display: none; }
@@ -431,6 +434,9 @@ button:focus-visible, input:focus-visible { outline: 3px solid rgba(21, 87, 246,
 .attachment-inline.failed { color: #ac3e45; }
 .attachment-inline-state { flex: 0 0 auto; font-weight: 650; }
 .attachment-inline-name { min-width: 0; overflow: hidden; color: #657187; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-delete { width: 20px; height: 20px; display: inline-grid; place-items: center; flex: 0 0 auto; padding: 0; border: 0; border-radius: 5px; color: #8b98aa; background: transparent; }
+.attachment-delete:hover:not(:disabled) { color: #a33e46; background: #fff0f0; }
+.attachment-delete:disabled { opacity: .45; }
 .composer-feedback { min-height: 20px; display: flex; align-items: center; gap: 6px; padding: 4px 25px 0; font-size: 11px; }
 .composer-feedback.success { color: #28764d; }
 .composer-feedback.error { color: #ac3e45; }
@@ -496,8 +502,10 @@ button:focus-visible, input:focus-visible { outline: 3px solid rgba(21, 87, 246,
 .submission-list-section { min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .submission-list-section .submission-section-heading { flex: 0 0 72px; }
 .submission-list { min-height: 0; flex: 1; overflow-x: hidden; overflow-y: auto; margin: 0; padding: 0; list-style: none; }
-.submission-row { min-height: 82px; display: grid; grid-template-columns: 36px minmax(110px, 1fr) 112px minmax(118px, .7fr); align-items: center; gap: 10px; padding: 13px 16px; border-bottom: 1px solid #edf0f4; }
+.submission-row { min-height: 82px; display: grid; grid-template-columns: 36px minmax(110px, 1fr) 112px minmax(118px, .7fr) 34px; align-items: center; gap: 10px; padding: 13px 16px; border-bottom: 1px solid #edf0f4; }
 .submission-row:last-child { border-bottom: 0; }
+.submission-delete { justify-self: end; color: #8993a3; }
+.submission-delete:hover { color: #a33e46; background: #fff1f1; }
 .submission-file-icon { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 7px; color: #47648e; background: #edf2f8; }
 .submission-file { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
 .submission-file strong { overflow: hidden; color: #303a4c; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
@@ -538,6 +546,7 @@ button:focus-visible, input:focus-visible { outline: 3px solid rgba(21, 87, 246,
 .admin-record.review, .admin-record-header.review { grid-template-columns: minmax(220px, 1fr) 150px 185px 250px; }
 .admin-record.source, .admin-record-header.source { grid-template-columns: minmax(240px, 1fr) 190px 70px 42px; }
 .admin-record.history, .admin-record-header.history { grid-template-columns: minmax(240px, 1fr) 150px 210px 150px; }
+.admin-record.cleanup, .admin-record-header.cleanup { grid-template-columns: minmax(240px, 1fr) 170px 210px 150px; }
 .admin-document-cell { min-width: 0; display: flex; align-items: center; gap: 10px; }
 .admin-document-cell > span:last-child { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
 .admin-document-cell strong { overflow: hidden; color: #303a4c; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
@@ -552,6 +561,9 @@ button:focus-visible, input:focus-visible { outline: 3px solid rgba(21, 87, 246,
 .admin-status.publishing > span { color: #275eae; }
 .admin-status.published > span { color: #28714b; }
 .admin-status.rejected > span, .admin-status.publish_failed > span { color: #a53f47; }
+.admin-status.cleanup-failed > span { color: #a53f47; }
+.admin-status.cleanup-pending > span { color: #8a641d; }
+.cleanup-step { color: #596a82; font-size: 12px; font-weight: 650; }
 .admin-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
 .admin-action { height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 11px; border-radius: 7px; font-size: 12px; font-weight: 680; }
 .admin-action.reject { border: 1px solid #e9c7ca; color: #a33e46; background: #fff; }
@@ -567,6 +579,17 @@ button:focus-visible, input:focus-visible { outline: 3px solid rgba(21, 87, 246,
 .admin-state { min-height: 260px; display: grid; place-content: center; justify-items: center; gap: 10px; color: #8993a3; font-size: 12px; text-align: center; }
 .admin-state.error { color: #a53f47; }
 .admin-state button { padding: 6px 10px; border: 1px solid #c9d8ef; border-radius: 6px; color: #2355a6; background: #f5f8fd; font-size: 11px; }
+.danger-icon { color: #a33e46; }
+.danger-icon:hover { color: #8d2730; background: #fff1f1; }
+.confirm-backdrop { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(25, 35, 52, .32); }
+.confirm-dialog { width: min(420px, 100%); position: relative; padding: 24px; border: 1px solid #dfe4eb; border-radius: 10px; background: #fff; box-shadow: 0 18px 55px rgba(28, 39, 58, .2); }
+.confirm-close { position: absolute; top: 14px; right: 14px; }
+.confirm-icon { width: 38px; height: 38px; display: grid; place-items: center; margin-bottom: 14px; border-radius: 8px; color: #a33e46; background: #fff0f0; }
+.confirm-dialog h2 { margin: 0; color: #202a3c; font-size: 17px; }
+.confirm-dialog p { margin: 10px 0 20px; color: #66758b; font-size: 12px; line-height: 1.6; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.danger-button { border: 1px solid #a33e46; color: #fff; background: #a33e46; }
+.danger-button:hover:not(:disabled) { background: #8d2730; }
 
 @media (max-width: 900px) {
   .workspace { grid-template-columns: 68px minmax(0, 1fr); }
@@ -581,14 +604,14 @@ button:focus-visible, input:focus-visible { outline: 3px solid rgba(21, 87, 246,
   .knowledge-content { grid-template-columns: minmax(0, 1fr); overflow-y: auto; }
   .submission-list-section { min-height: 360px; overflow: visible; }
   .submission-list { overflow: visible; }
-  .submission-row { grid-template-columns: 36px minmax(0, 1fr) minmax(140px, .7fr); }
+  .submission-row { grid-template-columns: 36px minmax(0, 1fr) minmax(140px, .7fr) 34px; }
   .submission-row time { display: none; }
   .admin-tabs { overflow-x: auto; padding-inline: 14px; }
   .admin-tabs button { min-width: 122px; }
   .admin-knowledge-content { padding: 14px; }
   .admin-records { min-width: 0; border: 0; background: transparent; }
   .admin-record-header { display: none; }
-  .admin-record.review, .admin-record.source, .admin-record.history { min-height: 0; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; margin-bottom: 10px; padding: 14px; border: 1px solid #dfe4eb; border-radius: 8px; background: #fff; }
+  .admin-record.review, .admin-record.source, .admin-record.history, .admin-record.cleanup { min-height: 0; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; margin-bottom: 10px; padding: 14px; border: 1px solid #dfe4eb; border-radius: 8px; background: #fff; }
   .admin-record > time { display: none; }
   .admin-status { grid-column: 1; }
   .admin-actions, .source-switch { grid-column: 2; grid-row: 1 / span 2; }
@@ -598,12 +621,12 @@ button:focus-visible, input:focus-visible { outline: 3px solid rgba(21, 87, 246,
   .knowledge-header { padding-inline: 18px; }
   .knowledge-owner { display: none; }
   .knowledge-content { gap: 14px; padding: 14px; }
-  .submission-row { grid-template-columns: 34px minmax(0, 1fr); }
+  .submission-row { grid-template-columns: 34px minmax(0, 1fr) 34px; }
   .submission-status { grid-column: 2; }
   .admin-knowledge-header { padding-inline: 18px; }
   .admin-knowledge-header span { display: none; }
   .admin-tabs button { min-width: 116px; padding-inline: 9px; }
-  .admin-record.review, .admin-record.source, .admin-record.history { grid-template-columns: minmax(0, 1fr); }
+  .admin-record.review, .admin-record.source, .admin-record.history, .admin-record.cleanup { grid-template-columns: minmax(0, 1fr); }
   .admin-actions, .source-switch { grid-column: 1; grid-row: auto; justify-self: start; }
   .admin-actions { justify-content: flex-start; flex-wrap: wrap; }
 }

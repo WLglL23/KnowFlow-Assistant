@@ -8,6 +8,17 @@ export type KnowledgeSource = {
   enabled: boolean;
 };
 
+export type CleanupFailure = {
+  resource_type: "ATTACHMENT" | "SUBMISSION";
+  resource_id: string;
+  step: "ES" | "MINIO";
+  status: "PENDING" | "FAILED";
+  error_code: string | null;
+  failed_at: string | null;
+};
+
+export type CleanupFailureList = { items: CleanupFailure[] };
+
 type KnowledgeSourceList = { items: KnowledgeSource[] };
 type ErrorEnvelope = {
   error?: { code?: string; message?: string; details?: { reason?: string } };
@@ -42,6 +53,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     },
   });
   if (!response.ok) return parseError(response);
+  if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }
 
@@ -90,3 +102,12 @@ export const downloadSubmissionDocument = (submissionId: string, filename: strin
 
 export const downloadSourceDocument = (sourceId: string, filename: string) =>
   download(`/api/admin/knowledge/sources/${sourceId}/document`, filename);
+
+export const deleteKnowledgeSource = (sourceId: string) =>
+  request<void>(`/api/admin/knowledge/sources/${sourceId}`, { method: "DELETE" });
+
+export const listCleanupFailures = () =>
+  request<CleanupFailureList>("/api/admin/cleanup-failures");
+
+export const retryCleanup = (resourceType: CleanupFailure["resource_type"], resourceId: string) =>
+  request<Record<string, unknown>>(`/api/admin/cleanup-failures/${resourceType}/${resourceId}/retry`, { method: "POST" });

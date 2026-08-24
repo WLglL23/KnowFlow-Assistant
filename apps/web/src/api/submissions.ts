@@ -56,6 +56,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     },
   });
   if (!response.ok) return parseError(response);
+  if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }
 
@@ -70,3 +71,6 @@ export function submitKnowledge(file: File): Promise<SubmissionUploadResponse> {
 
 export const listMySubmissions = () =>
   request<SubmissionList>("/api/knowledge/submissions/mine");
+
+export const deleteSubmission = (submissionId: string) =>
+  request<void>(`/api/knowledge/submissions/${submissionId}`, { method: "DELETE" });
