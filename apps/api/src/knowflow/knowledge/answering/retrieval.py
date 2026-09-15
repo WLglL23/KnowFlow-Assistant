@@ -21,6 +21,8 @@ class Evidence:
     filename: str
     pages: tuple[int, ...]
     text: str
+    document_title: str | None = None
+    headings: tuple[str, ...] = ()
 
 
 class _EmbeddingItem(BaseModel):
@@ -45,6 +47,8 @@ class _SearchSource(BaseModel):
     chunk_id: str
     page_numbers: list[int]
     text: str
+    document_title: str | None = None
+    headings: list[str] = Field(default_factory=list)
 
 
 class _SearchHit(BaseModel):
@@ -263,4 +267,6 @@ class AttachmentRetrieval:
             filename=filenames[source.source_id],
             pages=tuple(source.page_numbers),
             text=source.text,
+            document_title=source.document_title,
+            headings=tuple(source.headings),
         )

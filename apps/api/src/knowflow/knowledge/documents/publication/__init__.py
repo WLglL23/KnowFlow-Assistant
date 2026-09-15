@@ -3,17 +3,16 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
-from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
-from docling_core.transforms.chunker.hybrid_chunker import HybridChunker
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from knowflow.app.config import Settings
 from knowflow.app.errors import AppError
+from knowflow.knowledge.documents.chunks import DocumentChunk, chunk_document
 from knowflow.knowledge.documents.models import (
     CleanupStatus,
     KnowledgeSubmission,
@@ -206,7 +205,7 @@ class PublicationDocuments:
             await self._progress(submission_id, ProcessingStage.CHUNKING, 35)
             chunks = await asyncio.to_thread(self._chunk_document, document)
             await self._progress(submission_id, ProcessingStage.EMBEDDING, 60)
-            vectors = await self._embed([text for _pages, text in chunks])
+            vectors = await self._embed([chunk.text for chunk in chunks])
             await self._progress(submission_id, ProcessingStage.INDEXING, 85)
             await self._ensure_index()
             await self._replace_index(submission_id, digest, chunks, vectors)
@@ -258,23 +257,8 @@ class PublicationDocuments:
             submission.published_at = None
 
     @staticmethod
-    def _chunk_document(document: object) -> list[tuple[list[int], str]]:
-        chunks: list[tuple[list[int], str]] = []
-        for chunk in cast(Any, HybridChunker().chunk(cast(Any, document))):
-            text = chunk.text.strip()
-            pages = sorted(
-                {
-                    int(provenance.page_no)
-                    for item in chunk.meta.doc_items
-                    for provenance in item.prov
-                    if provenance.page_no is not None
-                }
-            )
-            if text and pages:
-                chunks.append((pages, text))
-        if not chunks:
-            raise ValueError("Docling produced no chunk with page provenance")
-        return chunks
+    def _chunk_document(document: object) -> list[DocumentChunk]:
+        return chunk_document(document)
 
     async def _embed(self, texts: list[str]) -> list[list[float]]:
         if not self._settings.embedding_base_url:
@@ -330,7 +314,7 @@ class PublicationDocuments:
         self,
         source_id: str,
         digest: str,
-        chunks: list[tuple[list[int], str]],
+        chunks: list[DocumentChunk],
         vectors: list[list[float]],
     ) -> None:
         base = self._settings.elasticsearch_url.rstrip("/")
@@ -342,7 +326,7 @@ class PublicationDocuments:
                 json={"query": {"term": {"source_id": source_id}}},
             )
             deleted.raise_for_status()
-            for number, ((pages, text), vector) in enumerate(zip(chunks, vectors), start=1):
+            for number, (chunk, vector) in enumerate(zip(chunks, vectors), start=1):
                 chunk_id = f"{source_id}:{number}"
                 indexed = await client.put(
                     f"{base}/{index}/_doc/{quote(chunk_id, safe='')}",
@@ -352,8 +336,10 @@ class PublicationDocuments:
                         "source_id": source_id,
                         "content_sha256": digest,
                         "chunk_id": chunk_id,
-                        "page_numbers": pages,
-                        "text": text,
+                        "page_numbers": chunk.pages,
+                        "text": chunk.text,
+                        "document_title": chunk.document_title,
+                        "headings": chunk.headings,
                         "vector": vector,
                     },
                 )

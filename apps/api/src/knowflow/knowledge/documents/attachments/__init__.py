@@ -5,11 +5,9 @@ import hashlib
 import logging
 import uuid
 from datetime import UTC, datetime
-from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
-from docling_core.transforms.chunker.hybrid_chunker import HybridChunker
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -17,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from knowflow.app.config import Settings
 from knowflow.app.errors import AppError
 from knowflow.knowledge.conversations.models import Conversation, KnowledgeMode
+from knowflow.knowledge.documents.chunks import DocumentChunk, chunk_document
 from knowflow.knowledge.documents.models import (
     AttachmentStatus,
     CleanupStatus,
@@ -328,7 +327,7 @@ class AttachmentDocuments:
             await self._progress(attachment_id, ProcessingStage.CHUNKING, 35)
             chunks = await asyncio.to_thread(self._chunk_document, document)
             await self._progress(attachment_id, ProcessingStage.EMBEDDING, 60)
-            texts = [text for _, text in chunks]
+            texts = [chunk.text for chunk in chunks]
             vectors = await self._embed(texts)
             await self._progress(attachment_id, ProcessingStage.INDEXING, 85)
             await self._replace_index(attachment_id, digest, chunks, vectors)
@@ -358,23 +357,8 @@ class AttachmentDocuments:
                 item.processed_at = datetime.now(UTC).replace(tzinfo=None)
 
     @staticmethod
-    def _chunk_document(document: object) -> list[tuple[list[int], str]]:
-        chunks: list[tuple[list[int], str]] = []
-        for chunk in cast(Any, HybridChunker().chunk(cast(Any, document))):
-            text = chunk.text.strip()
-            page_numbers: list[int] = sorted(
-                {
-                    int(provenance.page_no)
-                    for item in chunk.meta.doc_items
-                    for provenance in item.prov
-                    if provenance.page_no is not None
-                }
-            )
-            if text and page_numbers:
-                chunks.append((page_numbers, text))
-        if not chunks:
-            raise ValueError("PAGE_NUMBERS_MISSING: Docling produced no chunk with page provenance")
-        return chunks
+    def _chunk_document(document: object) -> list[DocumentChunk]:
+        return chunk_document(document)
 
     async def _embed(self, texts: list[str]) -> list[list[float]]:
         if not self._settings.embedding_base_url:
@@ -405,7 +389,7 @@ class AttachmentDocuments:
         self,
         source_id: str,
         digest: str,
-        chunks: list[tuple[list[int], str]],
+        chunks: list[DocumentChunk],
         vectors: list[list[float]],
     ) -> None:
         base, index = (
@@ -419,7 +403,7 @@ class AttachmentDocuments:
                 json={"query": {"term": {"source_id": source_id}}},
             )
             deleted.raise_for_status()
-            for chunk_number, ((page_numbers, text), vector) in enumerate(
+            for chunk_number, (chunk, vector) in enumerate(
                 zip(chunks, vectors), start=1
             ):
                 chunk_id = f"{source_id}:{chunk_number}"
@@ -431,8 +415,10 @@ class AttachmentDocuments:
                         "source_id": source_id,
                         "content_sha256": digest,
                         "chunk_id": chunk_id,
-                        "page_numbers": page_numbers,
-                        "text": text,
+                        "page_numbers": chunk.pages,
+                        "text": chunk.text,
+                        "document_title": chunk.document_title,
+                        "headings": chunk.headings,
                         "vector": vector,
                     },
                 )

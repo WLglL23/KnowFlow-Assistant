@@ -78,6 +78,16 @@ class TraceLimits(BaseModel):
     source_scope_compliance: bool | None = None
 
 
+class TraceEvidenceLocation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_id_hash: str
+    chunk_id_hash: str
+    document_title: str | None = None
+    headings: list[str] = Field(default_factory=list)
+    pages: list[int] = Field(default_factory=list)
+
+
 class TraceSubquestionObservation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -86,6 +96,8 @@ class TraceSubquestionObservation(BaseModel):
     initial_candidate_count: int
     rerank_candidate_count: int
     selected_evidence_count: int
+    selected_evidence_locations: list[TraceEvidenceLocation] = Field(default_factory=list)
+    used_evidence_locations: list[TraceEvidenceLocation] = Field(default_factory=list)
     selected_evidence_token_count: int
     final_evidence_count: int = 0
     final_evidence_token_count: int = 0

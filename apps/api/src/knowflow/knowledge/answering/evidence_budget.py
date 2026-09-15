@@ -7,24 +7,16 @@ from knowflow.knowledge.answering.retrieval import Evidence, EvidenceTokenizerV1
 
 
 def prioritize_candidates(query: str, candidates: list[Evidence]) -> list[Evidence]:
-    """Keep semantic rerank order while preferring a new page over duplicate pages."""
+    """Preserve semantic order; deduplicate chunk identities, not their pages."""
     del query  # Semantic relevance is already represented by the rerank ordering.
     ordered: list[Evidence] = []
-    remaining = list(candidates)
-    seen_pages: set[tuple[str, int]] = set()
-    while remaining:
-        novel_index = next(
-            (
-                index
-                for index, item in enumerate(remaining)
-                if any((item.source_id, page) not in seen_pages for page in item.pages)
-            ),
-            None,
-        )
-        selected_index = 0 if novel_index is None else novel_index
-        item = remaining.pop(selected_index)
+    seen_chunks: set[tuple[str, str]] = set()
+    for item in candidates:
+        key = (item.source_id, item.chunk_id)
+        if key in seen_chunks:
+            continue
         ordered.append(item)
-        seen_pages.update((item.source_id, page) for page in item.pages)
+        seen_chunks.add(key)
     return ordered
 
 

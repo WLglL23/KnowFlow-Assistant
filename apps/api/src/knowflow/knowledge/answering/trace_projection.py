@@ -4,9 +4,10 @@ import hashlib
 from dataclasses import dataclass
 
 from knowflow.knowledge.answering.outcomes import AnsweringOutcome
-from knowflow.knowledge.answering.retrieval import EvidenceTokenizerV1
+from knowflow.knowledge.answering.retrieval import Evidence, EvidenceTokenizerV1
 from knowflow.knowledge.answering.trace import (
     RunTraceV1,
+    TraceEvidenceLocation,
     TraceLimits,
     TraceRetrieval,
     TraceRetry,
@@ -29,6 +30,15 @@ class TraceProjectionMetadata:
 
 class TraceProjector:
     """Project trace diagnostics from the same outcome used by observation."""
+
+    @staticmethod
+    def locations(evidence: list[Evidence]) -> list[TraceEvidenceLocation]:
+        return [TraceEvidenceLocation(
+            source_id_hash=hashlib.sha256(item.source_id.encode()).hexdigest(),
+            chunk_id_hash=hashlib.sha256(item.chunk_id.encode()).hexdigest(),
+            document_title=item.document_title,
+            headings=list(item.headings), pages=list(item.pages),
+        ) for item in evidence]
 
     def project(
         self, outcome: AnsweringOutcome, metadata: TraceProjectionMetadata
@@ -87,6 +97,8 @@ class TraceProjector:
                     initial_candidate_count=item.initial_candidate_count,
                     rerank_candidate_count=item.rerank_candidate_count,
                     selected_evidence_count=len(item.evidence),
+                    selected_evidence_locations=self.locations(item.evidence),
+                    used_evidence_locations=self.locations(item.used_evidence),
                     selected_evidence_token_count=item.selected_evidence_token_count,
                     final_evidence_count=len(item.used_evidence),
                     final_evidence_token_count=sum(
