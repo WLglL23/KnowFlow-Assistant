@@ -22,7 +22,8 @@ async def create_submission(
     if file is None or len(file) != 1:
         raise AppError(422, "VALIDATION_FAILED", "请求校验失败")
     upload = file[0]
-    content = await upload.read()
+    limit = request.app.state.container.settings.submission_max_bytes
+    content = await upload.read(limit + 1)
     status_code, payload = await request.app.state.container.submissions.submit(
         account.id,
         upload.filename or "",

@@ -25,7 +25,7 @@ from knowflow.knowledge.documents.models import (
     ConversationAttachment,
     ProcessingStage,
 )
-from knowflow.knowledge.documents.object_store import PrivateObjectStore
+from knowflow.knowledge.documents.object_store import PrivateObjectStore, compensate_object
 from knowflow.knowledge.documents.pdf import PdfDocuments
 from knowflow.knowledge.documents.schemas import (
     AttachmentListResponse,
@@ -111,6 +111,7 @@ class AttachmentDocuments:
         attachment: ConversationAttachment | None = None
         result = "CREATED"
         status_code = 201
+        new_object_key: str | None = None
         try:
             async with self._sessions() as session, session.begin():
                 conversation = await session.scalar(
@@ -193,7 +194,16 @@ class AttachmentDocuments:
                         updated_at=now,
                     )
                     session.add(attachment)
-        except IntegrityError:
+                if result in {"CREATED", "RETRY_QUEUED"}:
+                    await session.flush()
+                    if result == "CREATED":
+                        new_object_key = attachment.object_key
+                    await self._objects.put(attachment.object_key, content)
+        except BaseException as exc:
+            if new_object_key is not None:
+                await asyncio.shield(self._compensate_upload(new_object_key))
+            if not isinstance(exc, IntegrityError):
+                raise
             async with self._sessions() as session:
                 attachment = await session.scalar(
                     select(ConversationAttachment).where(
@@ -207,13 +217,27 @@ class AttachmentDocuments:
             result, status_code = "EXISTING_QUEUED", 200
         assert attachment is not None
         response_attachment = AttachmentResponse.from_model(attachment)
-        if result in {"CREATED", "RETRY_QUEUED"}:
-            await self._objects.put(attachment.object_key, content)
-            await self._ensure_index()
         return status_code, AttachmentUploadResponse(
             result=result,  # type: ignore[arg-type]
             attachment=response_attachment,
         )
+
+    async def _compensate_upload(self, object_key: str) -> None:
+        try:
+            async with self._sessions() as session:
+                existing = await session.scalar(
+                    select(ConversationAttachment.id).where(
+                        ConversationAttachment.object_key == object_key
+                    )
+                )
+            if existing is not None:
+                return
+            await compensate_object(self._objects, object_key)
+        except Exception as exc:
+            logger.error(
+                "Attachment object compensation could not verify committed state",
+                extra={"exception_type": type(exc).__name__},
+            )
 
     async def list_for_owner(
         self, conversation_id: str, owner_account_id: str
@@ -333,6 +357,7 @@ class AttachmentDocuments:
             texts = [chunk.text for chunk in chunks]
             vectors = await self._embed(texts)
             await self._progress(attachment_id, ProcessingStage.INDEXING, 85)
+            await self._ensure_index()
             await self._replace_index(attachment_id, digest, chunks, vectors)
             await self._finish(attachment_id, True)
         except Exception:

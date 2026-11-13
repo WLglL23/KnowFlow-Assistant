@@ -15,7 +15,7 @@ from knowflow.knowledge.documents.models import (
     KnowledgeSubmission,
     KnowledgeSubmissionStatus,
 )
-from knowflow.knowledge.documents.object_store import PrivateObjectStore
+from knowflow.knowledge.documents.object_store import PrivateObjectStore, compensate_object
 from knowflow.knowledge.documents.pdf import PdfDocuments
 from knowflow.knowledge.documents.schemas import (
     SubmissionListResponse,
@@ -231,14 +231,4 @@ class SubmissionDocuments:
             submission.minio_cleanup_status = CleanupStatus.PENDING
 
     async def _compensate_object(self, object_key: str) -> None:
-        exception_type = "Exception"
-        for _attempt in range(3):
-            try:
-                await self._objects.delete(object_key)
-                return
-            except Exception as exc:
-                exception_type = type(exc).__name__
-        logging.getLogger("knowflow.documents").error(
-            "Submission object compensation failed",
-            extra={"exception_type": exception_type},
-        )
+        await compensate_object(self._objects, object_key)

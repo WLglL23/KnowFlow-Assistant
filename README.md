@@ -92,6 +92,8 @@ uv run --project apps/api --env-file .env python evals/knowledge/run_eval.py eva
 
 浏览器通过 FastAPI 访问 MySQL、私有 MinIO bucket、Elasticsearch chunk index，以及独立的 Chat、Embedding、Rerank adapter。附件使用持久队列，Docling 负责 PDF 解析，应用控制检索来源、轮次、证据和预算；引用由实际采用的页级证据生成。
 
+PDF 上传通过 pypdf 执行结构、加密状态和页数预检，附件最大 10 MiB、投稿最大 20 MiB，均最多 100 页。完整 Docling 解析在附件后台处理或投稿审核批准后执行；通过预检的文件若后续解析失败，会进入 `FAILED` 或 `PUBLISH_FAILED`。附件原始对象写入成功后才提交可领取的排队记录。
+
 当前检索回答采用 `core-exp-2-extractive` 原文摘录策略：识别本轮允许文档的标题／文件名，模型选择相关片段，后端验证后返回实际原文和页码，不自由改写。明确命名单份文档的单一问题不会因标题被扩大为多个问题；日常通用对话保持可用。已启动的 API 需重启后生效，历史回答不变。
 
 点击回答引用可在右侧预览对应 PDF 原文。右上角按钮可折叠／展开资料栏，拖动栏左侧分隔线可调整宽度，双击恢复默认；分隔线也支持左右方向键微调、Home／End 调到最小／最大。浏览器会保存布局偏好，点击引用会自动展开资料栏，PDF 随栏宽缩放。

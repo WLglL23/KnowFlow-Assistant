@@ -10,6 +10,8 @@ from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling_core.types.io import DocumentStream
+from pypdf import PdfReader
+from pypdf.errors import FileNotDecryptedError, WrongPasswordError
 
 from knowflow.app.config import Settings
 from knowflow.app.errors import AppError
@@ -51,21 +53,31 @@ class PdfDocuments:
             raise AppError(422, "INVALID_PDF", "PDF 无效", {"reason": "EXTENSION_INVALID"})
         if not content.startswith(b"%PDF-"):
             raise AppError(422, "INVALID_PDF", "PDF 无效", {"reason": "SIGNATURE_INVALID"})
-        if b"/Encrypt" in content:
+        return await asyncio.to_thread(self._page_count, content)
+
+    def _page_count(self, content: bytes) -> int:
+        try:
+            reader = PdfReader(io.BytesIO(content))
+        except (FileNotDecryptedError, WrongPasswordError, NotImplementedError) as exc:
             raise AppError(
                 422,
                 "INVALID_PDF",
                 "PDF 无效",
                 {"reason": "PASSWORD_PROTECTED"},
-            )
-        try:
-            document = await asyncio.to_thread(self.convert, filename, content)
-            pages = len(document.pages)
-        except AppError:
-            raise
+            ) from exc
         except Exception as exc:
             reason = "PAGE_COUNT_UNREADABLE" if b"/Type /Catalog" in content else "CORRUPT"
             raise AppError(422, "INVALID_PDF", "PDF 无效", {"reason": reason}) from exc
+        if reader.is_encrypted:
+            raise AppError(
+                422, "INVALID_PDF", "PDF 无效", {"reason": "PASSWORD_PROTECTED"}
+            )
+        try:
+            pages = len(reader.pages)
+        except Exception as exc:
+            raise AppError(
+                422, "INVALID_PDF", "PDF 无效", {"reason": "PAGE_COUNT_UNREADABLE"}
+            ) from exc
         if pages == 0:
             raise AppError(
                 422,

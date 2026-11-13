@@ -24,7 +24,8 @@ async def upload_attachment(
     if file is None or len(file) != 1:
         raise AppError(422, "VALIDATION_FAILED", "请求校验失败")
     upload = file[0]
-    content = await upload.read()
+    limit = request.app.state.container.settings.attachment_max_bytes
+    content = await upload.read(limit + 1)
     status, payload = await request.app.state.container.documents.upload(
         conversation_id,
         account.id,

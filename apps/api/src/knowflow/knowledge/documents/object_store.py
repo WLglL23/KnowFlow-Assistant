@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 from datetime import UTC, datetime
 from urllib.parse import quote, urlsplit
 
@@ -94,3 +95,17 @@ class PrivateObjectStore:
             "x-amz-date": stamp,
             "Authorization": authorization,
         }
+
+
+async def compensate_object(objects: PrivateObjectStore, object_key: str) -> None:
+    exception_type = "Exception"
+    for _attempt in range(3):
+        try:
+            await objects.delete(object_key)
+            return
+        except Exception as exc:
+            exception_type = type(exc).__name__
+    logging.getLogger("knowflow.documents").error(
+        "Uncommitted document object compensation failed",
+        extra={"exception_type": exception_type},
+    )
