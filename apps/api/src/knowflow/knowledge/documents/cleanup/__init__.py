@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from sqlalchemy import select
@@ -83,11 +83,9 @@ class CleanupDocuments:
             return
         scope = run.source_scope_json
         for resource_id in [
-            *scope.get("attachment_ids", []),
-            *scope.get("knowledge_source_ids", []),
+            *self._scope_ids(scope, "attachment_ids"),
+            *self._scope_ids(scope, "knowledge_source_ids"),
         ]:
-            if not isinstance(resource_id, str):
-                continue
             resource_type = "ATTACHMENT" if resource_id.startswith("att_") else "SUBMISSION"
             try:
                 resource = await self._load_resource(resource_type, resource_id)
@@ -258,6 +256,13 @@ class CleanupDocuments:
         return resource
 
     @staticmethod
+    def _scope_ids(scope: dict[str, object], key: str) -> list[str]:
+        values = scope.get(key, [])
+        if not isinstance(values, list):
+            raise ValueError("source scope resource IDs must be a list")
+        return [value for value in cast(list[object], values) if isinstance(value, str)]
+
+    @staticmethod
     async def _has_active_run_in_session(
         session: AsyncSession, resource_type: str, resource_id: str
     ) -> bool:
@@ -265,7 +270,10 @@ class CleanupDocuments:
             await session.scalars(select(AgentRun).where(AgentRun.status == RunStatus.RUNNING))
         ).all()
         key = "attachment_ids" if resource_type == "ATTACHMENT" else "knowledge_source_ids"
-        return any(resource_id in run.source_scope_json.get(key, []) for run in runs)
+        return any(
+            resource_id in CleanupDocuments._scope_ids(run.source_scope_json, key)
+            for run in runs
+        )
 
     async def _delete_es(self, source_id: str) -> None:
         endpoint = self._settings.elasticsearch_url.rstrip("/")

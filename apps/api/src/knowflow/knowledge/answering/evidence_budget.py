@@ -6,9 +6,8 @@ from dataclasses import dataclass
 from knowflow.knowledge.answering.retrieval import Evidence, EvidenceTokenizerV1
 
 
-def prioritize_candidates(query: str, candidates: list[Evidence]) -> list[Evidence]:
+def deduplicate_candidates(candidates: list[Evidence]) -> list[Evidence]:
     """Preserve semantic order; deduplicate chunk identities, not their pages."""
-    del query  # Semantic relevance is already represented by the rerank ordering.
     ordered: list[Evidence] = []
     seen_chunks: set[tuple[str, str]] = set()
     for item in candidates:

@@ -40,7 +40,7 @@ from knowflow.knowledge.answering.contracts import (
 from knowflow.knowledge.answering.evidence_budget import (
     EvidenceBudget,
     allocate_evidence,
-    prioritize_candidates,
+    deduplicate_candidates,
     promote_query_anchors,
 )
 from knowflow.knowledge.answering.excerpts import EvidenceExcerpt, InvalidExcerpt, extract_answer
@@ -526,7 +526,7 @@ class AnsweringService:
                 runner = SubquestionRunner(
                     lambda query: self._retrieve_query(query, source_filenames, context),
                     lambda query, evidence: self._answer_subquestion(
-                        prepared, query, evidence, context
+                        query, evidence, context
                     ),
                 )
                 context.subquestions = []
@@ -545,7 +545,7 @@ class AnsweringService:
                         context.candidate_sets.append(
                             promote_query_anchors(
                                 f"{decision.standalone_question} {query}",
-                                prioritize_candidates(query, retrieved.candidates),
+                                deduplicate_candidates(retrieved.candidates),
                             )
                         )
                 self._allocate_evidence(context)
@@ -820,7 +820,6 @@ class AnsweringService:
 
     async def _answer_subquestion(
         self,
-        prepared: PreparedContext,
         query: str,
         evidence: list[Evidence],
         context: RunExecutionContext,

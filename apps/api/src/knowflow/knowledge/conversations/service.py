@@ -87,17 +87,6 @@ class ConversationService:
             messages=[MessageResponse.from_model(message) for message in messages],
         )
 
-    async def rename(
-        self, conversation_id: str, owner_account_id: str, title: str
-    ) -> ConversationResponse:
-        return await self.update(
-            conversation_id,
-            owner_account_id,
-            title=title,
-            knowledge_mode=None,
-            selected_source_ids=None,
-        )
-
     async def update(
         self,
         conversation_id: str,

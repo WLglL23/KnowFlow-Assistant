@@ -85,7 +85,7 @@ class TraceEvidenceLocation(BaseModel):
     chunk_id_hash: str
     document_title: str | None = None
     headings: list[str] = Field(default_factory=list)
-    pages: list[int] = Field(default_factory=list)
+    pages: list[int] = Field(default_factory=lambda: list[int]())
 
 
 class TraceSubquestionObservation(BaseModel):
@@ -96,8 +96,12 @@ class TraceSubquestionObservation(BaseModel):
     initial_candidate_count: int
     rerank_candidate_count: int
     selected_evidence_count: int
-    selected_evidence_locations: list[TraceEvidenceLocation] = Field(default_factory=list)
-    used_evidence_locations: list[TraceEvidenceLocation] = Field(default_factory=list)
+    selected_evidence_locations: list[TraceEvidenceLocation] = Field(
+        default_factory=lambda: list[TraceEvidenceLocation]()
+    )
+    used_evidence_locations: list[TraceEvidenceLocation] = Field(
+        default_factory=lambda: list[TraceEvidenceLocation]()
+    )
     selected_evidence_token_count: int
     final_evidence_count: int = 0
     final_evidence_token_count: int = 0
