@@ -14,10 +14,9 @@ import {
   login,
   type LoginResponse,
   UNAUTHORIZED_EVENT,
+  TOKEN_KEY,
 } from "../../api/auth";
 import { AuthContext, type AuthContextValue, type AuthStatus } from "./AuthContext";
-
-const TOKEN_KEY = "knowflow.access_token";
 
 function storedToken(): string | null {
   return window.sessionStorage.getItem(TOKEN_KEY);

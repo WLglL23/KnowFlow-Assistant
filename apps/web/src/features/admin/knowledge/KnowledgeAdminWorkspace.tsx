@@ -34,6 +34,7 @@ import {
 import { ApiError } from "../../../api/auth";
 import type { Submission, SubmissionStatus } from "../../../api/submissions";
 import { ConfirmDialog } from "../../shared/ConfirmDialog";
+import { formatBytes, formatDate } from "../../shared/format";
 
 type AdminTab = "review" | "sources" | "history" | "cleanup";
 const submissionsKey = ["admin", "knowledge", "submissions"] as const;
@@ -47,21 +48,6 @@ const statusCopy: Record<SubmissionStatus, { label: string; detail: string }> = 
   PUBLISH_FAILED: { label: "发布失败", detail: "发布未完成，系统不会自动重试" },
   REJECTED: { label: "已拒绝", detail: "审核已结束" },
 };
-
-function formatDate(value: string): string {
-  return new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024 * 1024) return `${Math.max(1, Math.round(value / 1024))} KiB`;
-  return `${(value / 1024 / 1024).toFixed(1)} MiB`;
-}
 
 function adminError(error: unknown): string {
   if (!(error instanceof ApiError)) return "请求未完成，请稍后重试";

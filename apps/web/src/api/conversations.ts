@@ -1,4 +1,4 @@
-import { ApiError, UNAUTHORIZED_EVENT } from "./auth";
+import { request, requestJson } from "./http";
 
 export type Conversation = {
   id: string;
@@ -52,72 +52,37 @@ export type AttachmentUploadResponse = { result: AttachmentUploadResult; attachm
 export type ConversationDetail = Conversation & { messages: Message[] };
 export type ConversationList = { items: Conversation[] };
 
-type ErrorEnvelope = { error?: { code?: string; message?: string }; request_id?: string };
-const tokenKey = "knowflow.access_token";
-
-function token(): string {
-  return window.sessionStorage.getItem(tokenKey) ?? "";
-}
-
-async function parseError(response: Response): Promise<never> {
-  const body = (await response.json().catch(() => null)) as ErrorEnvelope | null;
-  if (response.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
-  throw new ApiError(
-    response.status,
-    body?.error?.code ?? "REQUEST_FAILED",
-    body?.error?.message ?? "请求未完成",
-    body?.request_id,
-  );
-}
-
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const isFormData = init.body instanceof FormData;
-  const response = await fetch(path, {
-    ...init,
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${token()}`,
-      ...(init.body && !isFormData ? { "Content-Type": "application/json" } : {}),
-      ...init.headers,
-    },
-  });
-  if (!response.ok) return parseError(response);
-  if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
-}
-
-export const listConversations = () => request<ConversationList>("/api/conversations");
-export const createConversation = () => request<Conversation>("/api/conversations", { method: "POST" });
-export const getConversation = (id: string) => request<ConversationDetail>(`/api/conversations/${id}`);
-export const deleteConversation = (id: string) => request<void>(`/api/conversations/${id}`, { method: "DELETE" });
+export const listConversations = () => requestJson<ConversationList>("/api/conversations");
+export const createConversation = () => requestJson<Conversation>("/api/conversations", { method: "POST" });
+export const getConversation = (id: string) => requestJson<ConversationDetail>(`/api/conversations/${id}`);
+export const deleteConversation = (id: string) => requestJson<void>(`/api/conversations/${id}`, { method: "DELETE" });
 export const renameConversation = (id: string, title: string) =>
-  request<Conversation>(`/api/conversations/${id}`, { method: "PATCH", body: JSON.stringify({ title }) });
+  requestJson<Conversation>(`/api/conversations/${id}`, { method: "PATCH", body: JSON.stringify({ title }) });
 export const updateKnowledgeScope = (
   id: string,
   knowledgeMode: Conversation["knowledge_mode"],
   selectedSourceIds: string[],
-) => request<Conversation>(`/api/conversations/${id}`, {
+) => requestJson<Conversation>(`/api/conversations/${id}`, {
   method: "PATCH",
   body: JSON.stringify({ knowledge_mode: knowledgeMode, selected_source_ids: selectedSourceIds }),
 });
 export const listAttachments = (conversationId: string) =>
-  request<AttachmentList>(`/api/conversations/${conversationId}/attachments`);
+  requestJson<AttachmentList>(`/api/conversations/${conversationId}/attachments`);
 export const deleteAttachment = (conversationId: string, attachmentId: string) =>
-  request<void>(`/api/conversations/${conversationId}/attachments/${attachmentId}`, { method: "DELETE" });
+  requestJson<void>(`/api/conversations/${conversationId}/attachments/${attachmentId}`, { method: "DELETE" });
 export const uploadAttachment = (conversationId: string, file: File) => {
   const body = new FormData();
   body.append("file", file);
-  return request<AttachmentUploadResponse>(`/api/conversations/${conversationId}/attachments`, {
+  return requestJson<AttachmentUploadResponse>(`/api/conversations/${conversationId}/attachments`, {
     method: "POST",
     body,
   });
 };
 
 export async function getCitationPreview(messageId: string, citationIndex: number): Promise<Blob> {
-  const response = await fetch(`/api/messages/${messageId}/citations/${citationIndex}/preview`, {
-    headers: { Accept: "application/pdf", Authorization: `Bearer ${token()}` },
+  const response = await request(`/api/messages/${messageId}/citations/${citationIndex}/preview`, {
+    headers: { Accept: "application/pdf" },
   });
-  if (!response.ok) return parseError(response);
   return response.blob();
 }
 
@@ -144,12 +109,11 @@ export async function streamRun(
   clientRequestId: string,
   onEvent: (event: RunEvent) => void,
 ): Promise<void> {
-  const response = await fetch(`/api/conversations/${id}/runs`, {
+  const response = await request(`/api/conversations/${id}/runs`, {
     method: "POST",
-    headers: { Accept: "text/event-stream", "Content-Type": "application/json", Authorization: `Bearer ${token()}` },
+    headers: { Accept: "text/event-stream" },
     body: JSON.stringify({ content, client_request_id: clientRequestId }),
   });
-  if (!response.ok) return parseError(response);
   if (!response.body) throw new Error("连接未返回流式内容");
 
   const reader = response.body.getReader();

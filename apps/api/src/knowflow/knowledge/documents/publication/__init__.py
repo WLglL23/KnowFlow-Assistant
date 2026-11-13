@@ -3,9 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
-from urllib.parse import quote
 
-import httpx
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -13,6 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from knowflow.app.config import Settings
 from knowflow.app.errors import AppError
 from knowflow.knowledge.documents.chunks import DocumentChunk, chunk_document
+from knowflow.knowledge.documents.indexing import (
+    embed_documents,
+    ensure_chunk_index,
+    replace_chunk_index,
+)
 from knowflow.knowledge.documents.models import (
     CleanupStatus,
     KnowledgeSubmission,
@@ -261,54 +264,10 @@ class PublicationDocuments:
         return chunk_document(document)
 
     async def _embed(self, texts: list[str]) -> list[list[float]]:
-        if not self._settings.embedding_base_url:
-            raise RuntimeError("embedding is not configured")
-        headers: dict[str, str] = {}
-        if self._settings.embedding_api_key:
-            headers["Authorization"] = (
-                f"Bearer {self._settings.embedding_api_key.get_secret_value()}"
-            )
-        vectors: list[list[float]] = []
-        async with httpx.AsyncClient(timeout=10) as client:
-            for start in range(0, len(texts), 20):
-                batch = texts[start : start + 20]
-                response = await client.post(
-                    f"{self._settings.embedding_base_url.rstrip('/')}/embeddings",
-                    headers=headers,
-                    json={"model": self._settings.embedding_model, "input": batch},
-                )
-                response.raise_for_status()
-                vectors.extend(item["embedding"] for item in response.json()["data"])
-        if len(vectors) != len(texts) or any(
-            len(vector) != self._settings.embedding_dimensions for vector in vectors
-        ):
-            raise RuntimeError("embedding dimension mismatch")
-        return vectors
+        return await embed_documents(self._settings, texts)
 
     async def _ensure_index(self) -> None:
-        base = self._settings.elasticsearch_url.rstrip("/")
-        index = self._settings.elasticsearch_index
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.put(
-                f"{base}/{index}",
-                json={
-                    "mappings": {
-                        "properties": {
-                            "source_id": {
-                                "type": "text",
-                                "fields": {"keyword": {"type": "keyword"}},
-                            },
-                            "vector": {
-                                "type": "dense_vector",
-                                "dims": self._settings.embedding_dimensions,
-                                "index": False,
-                            },
-                        }
-                    }
-                },
-            )
-            if response.status_code not in {200, 400}:
-                response.raise_for_status()
+        await ensure_chunk_index(self._settings)
 
     async def _replace_index(
         self,
@@ -317,30 +276,6 @@ class PublicationDocuments:
         chunks: list[DocumentChunk],
         vectors: list[list[float]],
     ) -> None:
-        base = self._settings.elasticsearch_url.rstrip("/")
-        index = self._settings.elasticsearch_index
-        async with httpx.AsyncClient(timeout=10) as client:
-            deleted = await client.post(
-                f"{base}/{index}/_delete_by_query",
-                params={"refresh": "true", "conflicts": "proceed"},
-                json={"query": {"term": {"source_id": source_id}}},
-            )
-            deleted.raise_for_status()
-            for number, (chunk, vector) in enumerate(zip(chunks, vectors), start=1):
-                chunk_id = f"{source_id}:{number}"
-                indexed = await client.put(
-                    f"{base}/{index}/_doc/{quote(chunk_id, safe='')}",
-                    params={"refresh": "true"},
-                    json={
-                        "source_type": "KNOWLEDGE",
-                        "source_id": source_id,
-                        "content_sha256": digest,
-                        "chunk_id": chunk_id,
-                        "page_numbers": chunk.pages,
-                        "text": chunk.text,
-                        "document_title": chunk.document_title,
-                        "headings": chunk.headings,
-                        "vector": vector,
-                    },
-                )
-                indexed.raise_for_status()
+        await replace_chunk_index(
+            self._settings, "KNOWLEDGE", source_id, digest, chunks, vectors
+        )

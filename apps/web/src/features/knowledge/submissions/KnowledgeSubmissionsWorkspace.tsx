@@ -16,6 +16,7 @@ import { type ChangeEvent, type FormEvent, useEffect, useRef, useState } from "r
 
 import { ApiError, type Account } from "../../../api/auth";
 import { ConfirmDialog } from "../../shared/ConfirmDialog";
+import { formatBytes, formatDate } from "../../shared/format";
 import {
   listMySubmissions,
   type Submission,
@@ -53,21 +54,6 @@ function submissionError(error: unknown): string {
   if (error.status === 401) return "登录已失效，请重新登录";
   if (error.status === 403) return "当前身份无权投稿";
   return "投稿未完成，请稍后重试";
-}
-
-function formatDate(value: string): string {
-  return new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024 * 1024) return `${Math.max(1, Math.round(value / 1024))} KiB`;
-  return `${(value / 1024 / 1024).toFixed(1)} MiB`;
 }
 
 function StatusIcon({ status }: { status: SubmissionStatus }) {
