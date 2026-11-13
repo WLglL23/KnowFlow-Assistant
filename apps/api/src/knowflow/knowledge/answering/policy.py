@@ -28,7 +28,7 @@ class RunPolicy:
 
 def core_experimental_policy(deadline_seconds: int) -> RunPolicy:
     return RunPolicy(
-        policy_version="core-exp-1",
+        policy_version="core-exp-2-extractive",
         trace_version="run-trace-v2",
         limits=RunLimits(deadline_seconds=deadline_seconds),
     )

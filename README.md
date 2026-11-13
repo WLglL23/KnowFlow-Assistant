@@ -19,6 +19,28 @@ KnowFlow 是一个中文知识工作台，当前交付范围为 V1 Core：员工
 
 ## 启动
 
+### Windows 一键启动 / 停止
+
+在根目录双击 **`start.bat`**。脚本检查 `.env`、已有依赖和端口，按当前配置补建缺少的 SSH 隧道，依次等待 API 和 Web 就绪，然后自动打开 <http://127.0.0.1:5173/>。SSH 如需密码或首次确认主机指纹，请在弹出的 SSH 窗口中完成。
+
+保留启动窗口，在该窗口**按回车或 `Ctrl+C` 停止**本次启动的前后端和隧道。已有隧道会保留；8000 或 5173 已被占用时会报错，避免重复启动。停止会结束进程树，进行中的请求会中断；请等待重要处理完成后再停止。
+
+停止时窗口会依次显示 `Stopping KnowFlow...` 和 `KnowFlow stopped.`。更新启动脚本前已打开的窗口仍运行旧逻辑，可先在旧窗口按回车停止，再重新双击 `start.bat`。Ctrl+C 需要在启动窗口中按下。
+
+日志写入 `.run/api.log`、`.run/api.error.log`、`.run/web.log` 和 `.run/web.error.log`，每次启动覆盖，目录已加入 Git 忽略。脚本面向上文已配置好的工作区，不安装依赖、不执行数据库迁移、不启动或停止远端容器。
+
+可选命令（PowerShell）：
+
+```powershell
+.\start.bat -Check                         # 仅检查环境，不启动服务
+.\start.bat -NoBrowser                     # 启动但不自动打开浏览器
+.\start.bat -SshTarget user@your-server     # 覆盖 README 默认 SSH 目标
+```
+
+若缺少依赖，先安装 Python 3.12、uv、Node.js 24 / npm 11，再运行 `uv sync --project apps/api` 和 `npm --prefix apps/web ci`；`.env` 仍需按实际环境配置。
+
+### 手动启动
+
 在 PowerShell 中打开三个终端。若远端资源尚未通过隧道提供，先运行：
 
 ```powershell
@@ -69,6 +91,10 @@ uv run --project apps/api --env-file .env python evals/knowledge/run_eval.py eva
 ## 架构边界
 
 浏览器通过 FastAPI 访问 MySQL、私有 MinIO bucket、Elasticsearch chunk index，以及独立的 Chat、Embedding、Rerank adapter。附件使用持久队列，Docling 负责 PDF 解析，应用控制检索来源、轮次、证据和预算；引用由实际采用的页级证据生成。
+
+当前检索回答采用 `core-exp-2-extractive` 原文摘录策略：识别本轮允许文档的标题／文件名，模型选择相关片段，后端验证后返回实际原文和页码，不自由改写。明确命名单份文档的单一问题不会因标题被扩大为多个问题；日常通用对话保持可用。已启动的 API 需重启后生效，历史回答不变。
+
+点击回答引用可在右侧预览对应 PDF 原文。右上角按钮可折叠／展开资料栏，拖动栏左侧分隔线可调整宽度，双击恢复默认；分隔线也支持左右方向键微调、Home／End 调到最小／最大。浏览器会保存布局偏好，点击引用会自动展开资料栏，PDF 随栏宽缩放。
 
 Core 包含 US1～US7 的既有能力和四类资源删除闭环，不包含账号管理/删除、System 或 Run 诊断、开放工具循环、Web Search、代码执行、多 Agent、后台自动重试调度、独立 Worker 或普通用户完整 PDF 下载。
 

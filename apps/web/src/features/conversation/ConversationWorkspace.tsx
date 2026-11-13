@@ -9,6 +9,7 @@ import { KnowledgeAdminWorkspace } from "../admin/knowledge/KnowledgeAdminWorksp
 import type { CitationSelection } from "../citations/CitationPreviewPanel";
 import { ConversationComposer } from "./ConversationComposer";
 import { KnowledgeContextSidebar } from "./KnowledgeContextSidebar";
+import { ResizableContextLayout } from "./ResizableContextLayout";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 
 function errorMessage(error: unknown): string {
@@ -236,7 +237,9 @@ export function ConversationWorkspace({
           <KnowledgeAdminWorkspace />
         </section>
       ) : (
-      <section className="workspace-main conversation-workbench context-open">
+      <ResizableContextLayout revealSignal={citationSelection} sidebar={
+        <KnowledgeContextSidebar account={account} conversation={detail.data ?? selected} citationSelection={citationSelection} onCitationClose={() => setCitationSelection(null)} onConversationUpdated={async () => { await detail.refetch(); }} />
+      }>
       <section className="conversation-panel">
         {selected && <header className="conversation-header"><div>{editing ? <div className="title-edit"><input value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") saveTitle(); if (event.key === "Escape") setEditing(false); }} autoFocus /><button className="icon-button" type="button" onClick={saveTitle} disabled={renameMutation.isPending} aria-label="保存标题"><Check size={17} /></button><button className="icon-button" type="button" onClick={() => setEditing(false)} disabled={renameMutation.isPending} aria-label="取消重命名"><X size={17} /></button></div> : <div className="title-row"><h2>{detail.data?.title ?? selected.title}</h2><button className="icon-button" type="button" onClick={() => { setTitleDraft(detail.data?.title ?? selected.title); setError(null); setEditing(true); }} aria-label="重命名会话" title="重命名"><Pencil size={16} /></button><button className="icon-button danger-icon" type="button" onClick={() => setDeleteConversationOpen(true)} aria-label="删除会话" title="删除会话"><Trash2 size={16} /></button></div>}</div> </header>}
         <div className="message-flow" aria-live="polite">
@@ -250,8 +253,7 @@ export function ConversationWorkspace({
         {error && <div className="conversation-error" role="alert"><AlertCircle size={17} />{error}</div>}
         {selected && <ConversationComposer accountId={account.id} conversationId={selectedId} knowledgeMode={detail.data?.knowledge_mode ?? selected.knowledge_mode ?? "DISABLED"} selectedSourceCount={detail.data?.knowledge_mode === "SELECTED" ? detail.data.selected_source_ids.length : 0} draft={draft} streaming={streaming} onDraftChange={setDraft} onSend={() => void send()} />}
       </section>
-      <KnowledgeContextSidebar account={account} conversation={detail.data ?? selected} citationSelection={citationSelection} onCitationClose={() => setCitationSelection(null)} onConversationUpdated={async () => { await detail.refetch(); }} />
-      </section>
+      </ResizableContextLayout>
       )}
       {deleteConversationOpen && selected && <ConfirmDialog title="删除这个会话？" description={`“${detail.data?.title ?? selected.title}”及其中的附件会立即隐藏且不可恢复。正在进行的回答会继续完成，历史引用会保留为“来源已删除”。`} busy={deleteMutation.isPending} onCancel={() => setDeleteConversationOpen(false)} onConfirm={() => deleteMutation.mutate(selected.id)} />}
     </main>

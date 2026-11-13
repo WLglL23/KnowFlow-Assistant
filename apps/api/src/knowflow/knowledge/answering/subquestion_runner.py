@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal
 
+from knowflow.knowledge.answering.excerpts import EvidenceExcerpt, InvalidExcerpt, extract_answer
 from knowflow.knowledge.answering.outcomes import SubquestionOutcome
 from knowflow.knowledge.answering.retrieval import Evidence
 
@@ -20,8 +21,7 @@ Answer = Callable[[str, list[Evidence]], Awaitable["SubquestionAnswer"]]
 @dataclass(frozen=True, slots=True)
 class SubquestionAnswer:
     status: Literal["ANSWERED", "INSUFFICIENT"]
-    answer: str
-    labels: list[str]
+    excerpts: list[EvidenceExcerpt]
     missing_facts: list[str]
 
 
@@ -105,23 +105,17 @@ class SubquestionRunner:
             outcome.status = "INSUFFICIENT"
             outcome.missing_facts = list(result.missing_facts)
             return []
-        if not result.answer.strip() or not result.labels:
+        try:
+            answer, used = extract_answer(result.excerpts, outcome.evidence)
+        except InvalidExcerpt:
             outcome.status = "FAILED"
             outcome.failure_code = "MODEL_FAILED"
             return None
-        evidence_by_label = {
-            f"E{index + 1}": item for index, item in enumerate(outcome.evidence)
-        }
-        if not set(result.labels).issubset(evidence_by_label):
-            outcome.status = "FAILED"
-            outcome.failure_code = "MODEL_FAILED"
-            return None
-        used = [evidence_by_label[label] for label in dict.fromkeys(result.labels)]
         outcome.status = "ANSWERED"
-        outcome.answer = result.answer.strip()
+        outcome.answer = answer
         outcome.answer_executed = True
         outcome.used_evidence = used
-        outcome.label_count = len(result.labels)
+        outcome.label_count = len({item.evidence_label for item in result.excerpts})
         outcome.citation_presence = bool(used)
         outcome.citation_integrity = bool(used)
         return used

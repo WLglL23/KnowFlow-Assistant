@@ -144,6 +144,24 @@ button:focus-visible, input:focus-visible { outline: 3px solid rgba(21, 87, 246,
   background: #fff;
 }
 .conversation-workbench.preview-open, .conversation-workbench.context-open { grid-template-columns: minmax(480px, 1fr) 340px; }
+.conversation-workbench.context-layout { position: relative; grid-template-columns: minmax(0, 1fr) 8px var(--context-panel-width); }
+.conversation-workbench.context-collapsed { grid-template-columns: minmax(0, 1fr) 0 44px; }
+.context-layout > .conversation-panel { grid-column: 1; }
+.context-resizer { grid-column: 2; position: relative; z-index: 2; min-height: 0; cursor: col-resize; touch-action: none; background: #f3f5f8; }
+.context-resizer::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: #dfe4eb; transition: background .15s; }
+.context-resizer:hover::after, .context-resizer:focus-visible::after, .context-resizing .context-resizer::after { background: #3d77dc; }
+.context-resizer:focus-visible { outline: 2px solid #3d77dc; outline-offset: -2px; }
+.context-resizing { cursor: col-resize; user-select: none; }
+.context-panel-shell { grid-column: 3; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; border-left: 1px solid #dfe4eb; background: #fbfcfe; }
+.context-panel-toolbar { min-height: 40px; flex: 0 0 40px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 8px 0 14px; border-bottom: 1px solid #e6ebf2; background: #fff; }
+.context-panel-toolbar > span { color: #71809c; font-size: 11px; font-weight: 650; }
+.context-panel-shell.is-collapsed .context-panel-toolbar { justify-content: center; padding: 0; }
+.context-panel-content { min-height: 0; flex: 1; overflow: hidden; }
+.context-panel-content[hidden], .context-resizer[hidden] { display: none; }
+.context-panel-content > .knowledge-context-sidebar { border-left: 0; }
+.conversation-workbench.context-overlay { grid-template-columns: minmax(0, 1fr) 0 44px; }
+.context-overlay .context-panel-shell:not(.is-collapsed) { width: var(--context-panel-width); position: absolute; z-index: 10; top: 0; right: 0; bottom: 0; box-shadow: -12px 0 32px rgba(36, 55, 96, .16); }
+.context-overlay .context-resizer { position: absolute; z-index: 11; top: 0; bottom: 0; right: var(--context-panel-width); width: 8px; }
 .citation-header span {
   display: block;
   margin-bottom: 2px;
@@ -152,12 +170,12 @@ button:focus-visible, input:focus-visible { outline: 3px solid rgba(21, 87, 246,
   font-weight: 650;
 }
 .citation-header h3 { margin: 0; color: #2d374a; font-size: 15px; letter-spacing: 0; }
-.citation-panel { min-width: 0; height: 100vh; display: flex; flex-direction: column; overflow: hidden; border-left: 1px solid #dfe4eb; background: #f3f5f8; }
+.citation-panel { min-width: 0; min-height: 0; height: 100%; flex: 1; display: flex; flex-direction: column; overflow: hidden; border-left: 1px solid #dfe4eb; background: #f3f5f8; }
 .citation-header { min-height: 64px; flex: 0 0 64px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 14px 0 16px; border-bottom: 1px solid #dfe4eb; background: #fff; }
 .citation-header > div { min-width: 0; }
 .citation-header h3 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .citation-pages-label { min-height: 38px; display: flex; align-items: center; gap: 7px; padding: 0 16px; color: #64738a; font-size: 11px; }
-.citation-document { min-height: 0; flex: 1; overflow: auto; padding: 0 16px 18px; }
+.citation-document { min-height: 0; flex: 1; overflow: auto; scrollbar-gutter: stable; padding: 0 16px 18px; }
 .citation-document .react-pdf__Document { display: flex; flex-direction: column; gap: 12px; }
 .citation-document .react-pdf__Page { overflow: hidden; border: 1px solid #d9dee7; border-radius: 3px; background: #fff; box-shadow: 0 5px 16px rgba(47, 57, 75, 0.1); }
 .citation-document canvas { max-width: 100%; height: auto !important; display: block; }
