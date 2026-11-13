@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+from knowflow.knowledge.answering.compatibility import legacy_retrieval_fields
 from knowflow.knowledge.answering.outcomes import AnsweringOutcome
 from knowflow.knowledge.answering.retrieval import EvidenceTokenizerV1
 
@@ -68,9 +69,7 @@ class SafeObservationProjector:
                     ),
                     "verify_label_count": item.label_count,
                     "verify_missing_fact_count": len(item.missing_facts),
-                    "has_supplemental_query": item.has_supplemental_query,
-                    "second_round_identity_changed": item.second_round_identity_changed,
-                    "second_round_useful": item.second_round_useful,
+                    **legacy_retrieval_fields(item),
                     "answer_executed": item.answer_executed,
                     "citation_presence": item.citation_presence,
                     "citation_integrity": item.citation_integrity,

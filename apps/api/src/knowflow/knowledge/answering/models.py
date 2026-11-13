@@ -8,6 +8,7 @@ from sqlalchemy.dialects.mysql import DATETIME
 from sqlalchemy.orm import Mapped, mapped_column
 
 from knowflow.app.database import Base
+from knowflow.knowledge.answering.compatibility import LEGACY_RETRIEVAL_STAGE
 
 
 class MessageRole(StrEnum):
@@ -38,7 +39,7 @@ class StageName(StrEnum):
     PLAN = "PLAN"
     RETRIEVE_1 = "RETRIEVE_1"
     VERIFY = "VERIFY"
-    RETRIEVE_2 = "RETRIEVE_2"
+    RETRIEVE_2 = LEGACY_RETRIEVAL_STAGE
     GENERATE = "GENERATE"
 
 

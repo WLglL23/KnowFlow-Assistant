@@ -44,6 +44,7 @@ class SubquestionOutcome:
     label_count: int = 0
     citation_presence: bool | None = None
     citation_integrity: bool | None = None
+    # Retained constructor fields for historical diagnostics, projected in compatibility.py.
     has_supplemental_query: bool = False
     second_round_identity_changed: bool | None = None
     second_round_useful: bool | None = None

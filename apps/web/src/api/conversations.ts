@@ -1,4 +1,5 @@
 import { request, requestJson } from "./http";
+import type { RunStage } from "./runStages";
 
 export type Conversation = {
   id: string;
@@ -90,7 +91,7 @@ export type RunEvent = {
   type: "stage.started" | "stage.completed" | "answer.delta" | "run.completed" | "run.failed";
   request_id: string;
   run_id: string;
-  stage?: "UNDERSTAND" | "PLAN" | "RETRIEVE_1" | "VERIFY" | "RETRIEVE_2" | "GENERATE";
+  stage?: RunStage;
   delta?: string;
   error?: { code: string; message: string };
 };

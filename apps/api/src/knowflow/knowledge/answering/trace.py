@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from knowflow.knowledge.answering.compatibility import LegacyRetrievalTrace
+
 
 class TraceVersions(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -88,7 +90,7 @@ class TraceEvidenceLocation(BaseModel):
     pages: list[int] = Field(default_factory=lambda: list[int]())
 
 
-class TraceSubquestionObservation(BaseModel):
+class TraceSubquestionObservation(LegacyRetrievalTrace):
     model_config = ConfigDict(extra="forbid")
 
     subquestion_id_hash: str
@@ -105,26 +107,23 @@ class TraceSubquestionObservation(BaseModel):
     selected_evidence_token_count: int
     final_evidence_count: int = 0
     final_evidence_token_count: int = 0
-    input_reference_page_hit: bool | None
+    input_reference_page_hit: bool | None = None
     initial_candidate_page_hashes: list[str] = Field(default_factory=lambda: list[str]())
     rerank_candidate_page_hashes: list[str] = Field(default_factory=lambda: list[str]())
     verify_input_page_hashes: list[str]
     final_evidence_page_hashes: list[str] = Field(default_factory=lambda: list[str]())
     verify_label_count: int
     verify_missing_fact_count: int
-    has_supplemental_query: bool
-    second_round_identity_changed: bool | None
-    second_round_useful: bool | None
     answer_executed: bool
-    citation_presence: bool | None
-    citation_integrity: bool | None
+    citation_presence: bool | None = None
+    citation_integrity: bool | None = None
 
 
 class RunTraceV1(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     versions: TraceVersions
-    route: str | None
+    route: str | None = None
     usage: TraceUsage
     timing: TraceTiming
     retry: TraceRetry
